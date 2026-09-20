@@ -22,6 +22,8 @@ pub struct WindowState {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    #[serde(default)]
+    pub dark_mode: bool,
 }
 
 impl AppConfig {

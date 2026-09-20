@@ -1,6 +1,9 @@
+use super::common::{render_event_box, EventBoxStyle};
 use super::layout::{day_font, event_font, header_font};
 use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
+use crate::app::EventIndex;
+use crate::ui::AppTheme;
 use chrono::{Datelike, NaiveDate};
 use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{column, container, mouse_area, row, text};
@@ -8,9 +11,11 @@ use iced::{Background, Border, Color, Element, Length, Theme};
 
 pub fn build_view<'a>(
     selected: NaiveDate,
-    events: &'a [CalendarEvent],
+    index: &'a EventIndex,
     palette: &'a ColorPalette,
+    theme: &'a AppTheme,
     width: f32,
+    height: f32,
 ) -> Element<'a, crate::Message> {
     let year = selected.year();
     let month = selected.month();
@@ -24,16 +29,20 @@ pub fn build_view<'a>(
     let ef = event_font(width);
     let hf = header_font(width);
 
+    let chrome = 130.0;
+    let weeks_f = weeks_needed as f32;
+    let cell_h = ((height - chrome) / weeks_f).max(40.0);
+    let day_label_h = df as f32 + 8.0;
+    let event_h = ef as f32 + 12.0 + 3.0;
+    let rows_for_events = ((cell_h - day_label_h - 8.0) / event_h).floor();
+    let max_events = (rows_for_events as usize).clamp(1, 6);
+
     let weekdays = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
     let header: Vec<Element<'a, crate::Message>> = weekdays
         .iter()
         .enumerate()
         .map(|(i, w)| -> Element<'a, crate::Message> {
-            let c = if i >= 5 {
-                Color::from_rgb(0.55, 0.55, 0.6)
-            } else {
-                Color::from_rgb(0.3, 0.3, 0.35)
-            };
+            let c = if i >= 5 { theme.text_dim } else { theme.text_muted };
             container(text(*w).size(hf).style(c))
                 .width(Length::FillPortion(1))
                 .padding(4)
@@ -56,20 +65,20 @@ pub fn build_view<'a>(
                 days_row.push(empty);
             } else {
                 let date = NaiveDate::from_ymd_opt(year, month, current_day).unwrap();
-                let day_events: Vec<&CalendarEvent> = events
-                    .iter()
-                    .filter(|e| e.start.with_timezone(&chrono::Local).date_naive() == date)
-                    .collect();
+                let day_events = index.for_date(date);
                 let is_today = date == today;
                 let is_weekend = weekday >= 5;
                 days_row.push(render_day(
+                    date,
                     current_day,
                     &day_events,
                     palette,
+                    theme,
                     is_today,
                     is_weekend,
                     df,
                     ef,
+                    max_events,
                 ));
                 current_day += 1;
             }
@@ -89,28 +98,32 @@ pub fn build_view<'a>(
 }
 
 fn render_day<'a>(
+    date: NaiveDate,
     day: u32,
-    events: &[&CalendarEvent],
+    events: &[&'a CalendarEvent],
     palette: &'a ColorPalette,
+    theme: &'a AppTheme,
     is_today: bool,
     is_weekend: bool,
     df: u16,
     ef: u16,
+    max_events: usize,
 ) -> Element<'a, crate::Message> {
     let day_num_color = if is_today {
         Color::WHITE
     } else if is_weekend {
-        Color::from_rgb(0.45, 0.45, 0.5)
+        theme.text_dim
     } else {
-        Color::from_rgb(0.2, 0.2, 0.25)
+        theme.text
     };
 
+    let today_bg = theme.accent;
     let day_label: Element<'a, crate::Message> = if is_today {
         container(text(day.to_string()).size(df).style(Color::WHITE))
             .padding([1, 6])
-            .style(|_theme: &Theme| ContainerAppearance {
+            .style(move |_theme: &Theme| ContainerAppearance {
                 text_color: Some(Color::WHITE),
-                background: Some(Background::Color(Color::from_rgb(0.26, 0.52, 0.96))),
+                background: Some(Background::Color(today_bg)),
                 border: Border {
                     color: Color::TRANSPARENT,
                     width: 0.0,
@@ -127,98 +140,62 @@ fn render_day<'a>(
 
     let mut day_children: Vec<Element<'a, crate::Message>> = vec![day_label];
 
-    for event in events.iter().take(3) {
-        let bg_color = event
-            .color_id
-            .as_ref()
-            .and_then(|id| palette.background_for(id))
-            .and_then(parse_hex_color)
-            .unwrap_or(Color::from_rgb(0.55, 0.55, 0.6));
+    let show_more = events.len() > max_events;
+    let shown = if show_more {
+        max_events.saturating_sub(1)
+    } else {
+        events.len()
+    };
 
-        let fg_color = event
-            .color_id
-            .as_ref()
-            .and_then(|id| palette.foreground_for(id))
-            .and_then(parse_hex_color)
-            .unwrap_or(Color::BLACK);
-
-        let ev_text: Element<'a, crate::Message> = text(event.summary.clone())
-            .size(ef)
-            .style(fg_color)
-            .into();
-
-        let ev_container: Element<'a, crate::Message> = container(ev_text)
-            .style(move |_theme: &Theme| ContainerAppearance {
-                text_color: Some(fg_color),
-                background: Some(Background::Color(bg_color)),
-                border: Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 4.0.into(),
-                },
-                shadow: Default::default(),
-            })
-            .padding([2, 5])
-            .width(Length::Fill)
-            .into();
-
-        let ev_clickable: Element<'a, crate::Message> = mouse_area(ev_container)
-            .on_press(crate::Message::OpenEditForm((*event).clone()))
-            .into();
-
-        day_children.push(ev_clickable);
+    for event in events.iter().take(shown) {
+        day_children.push(render_event_box(event, palette, EventBoxStyle::month(ef)));
     }
 
-    if events.len() > 3 {
-        let more: Element<'a, crate::Message> = text(format!("+{}", events.len() - 3))
-            .size(ef.saturating_sub(2))
-            .style(Color::from_rgb(0.4, 0.4, 0.45))
+    if show_more {
+        let more: Element<'a, crate::Message> = text(format!("+{}", events.len() - shown))
+            .size(ef.saturating_sub(1))
+            .style(theme.text_dim)
             .into();
         day_children.push(more);
     }
 
     let day_col: Element<'a, crate::Message> = column(day_children).spacing(3).into();
 
-    let bg = if is_today {
-        Color::from_rgba(0.85, 0.92, 1.0, 0.55)
+    let cell_bg = if is_today {
+        theme.today_bg
     } else if is_weekend {
-        Color::from_rgba(0.94, 0.94, 0.97, 0.4)
+        theme.cell_bg_weekend
     } else {
-        Color::from_rgba(1.0, 1.0, 1.0, 0.5)
+        theme.cell_bg
     };
 
-    let border_color = if is_today {
-        Color::from_rgba(0.26, 0.52, 0.96, 0.7)
+    let cell_border = if is_today {
+        theme.today_border
     } else {
-        Color::from_rgba(0.75, 0.75, 0.8, 0.4)
+        theme.border_light
     };
 
-    container(day_col)
+    let cell_text = theme.text;
+
+    let cell: Element<'a, crate::Message> = container(day_col)
         .width(Length::FillPortion(1))
         .height(Length::Fill)
         .padding(4)
         .style(move |_theme: &Theme| ContainerAppearance {
-            text_color: Some(Color::BLACK),
-            background: Some(Background::Color(bg)),
+            text_color: Some(cell_text),
+            background: Some(Background::Color(cell_bg)),
             border: Border {
-                color: border_color,
+                color: cell_border,
                 width: 1.0,
                 radius: 6.0.into(),
             },
             shadow: Default::default(),
         })
-        .into()
-}
+        .into();
 
-pub fn parse_hex_color(hex: &str) -> Option<Color> {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
-    Some(Color::from_rgb(r, g, b))
+    mouse_area(cell)
+        .on_press(crate::Message::OpenCreateFormForDate(date))
+        .into()
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {

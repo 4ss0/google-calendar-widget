@@ -1,0 +1,50 @@
+use crate::app::ApiResult;
+use crate::api::client::CalendarEvent;
+use crate::config::StoredToken;
+use crate::tray::TrayMessage;
+use chrono::NaiveDate;
+use iced::{Point, Size};
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    TokenPolled(Result<StoredToken, String>),
+    DataFetched(ApiResult<Vec<CalendarEvent>>),
+    WindowResized(Size),
+    WindowMoved(Point),
+    FlushWindowState,
+    WindowFocused,
+    CursorMoved(Point),
+    StartResize,
+    ResizeEnded,
+    Prev,
+    Next,
+    Today,
+    OpenCreateForm,
+    OpenCreateFormForDate(NaiveDate),
+    OpenEditForm(CalendarEvent),
+    CloseForm,
+    FormTitleChanged(String),
+    FormDateChanged(String),
+    FormStartChanged(String),
+    FormEndChanged(String),
+    FormColorChanged(String),
+    SaveEvent,
+    RequestDeleteEvent,
+    CancelDeleteEvent,
+    DeleteEvent,
+    EventSaved(ApiResult<()>),
+    EventDeleted(ApiResult<()>),
+    StartDrag,
+    CloseWindow,
+    Reauthenticate,
+    ApplyWindowEffects,
+    KeepAtBottom,
+    IncreaseTransparency,
+    DecreaseTransparency,
+    ToggleAutostart,
+    AutostartToggled(Result<bool, String>),
+    ToggleMenu,
+    ToggleTheme,
+    PollTray,
+    TrayEvent(TrayMessage),
+}

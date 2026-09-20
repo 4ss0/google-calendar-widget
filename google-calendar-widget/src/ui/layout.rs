@@ -1,5 +1,6 @@
-use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
+use crate::app::EventIndex;
+use crate::ui::AppTheme;
 use chrono::NaiveDate;
 use iced::Element;
 
@@ -37,15 +38,21 @@ pub fn header_font(width: f32) -> u16 {
 pub fn build_view<'a>(
     layout: Layout,
     selected: NaiveDate,
-    events: &'a [CalendarEvent],
+    index: &'a EventIndex,
     palette: &'a ColorPalette,
+    theme: &'a AppTheme,
     width: f32,
+    height: f32,
 ) -> Element<'a, crate::Message> {
     match layout {
         Layout::Month => {
-            super::month_view::build_view(selected, events, palette, width)
+            super::month_view::build_view(selected, index, palette, theme, width, height)
         }
-        Layout::Week => super::week_view::build_view(selected, events, palette, width),
-        Layout::Day => super::day_view::build_view(selected, events, palette, width),
+        Layout::Week => {
+            super::week_view::build_view(selected, index, palette, theme, width, height)
+        }
+        Layout::Day => {
+            super::day_view::build_view(selected, index, palette, theme, width, height)
+        }
     }
 }

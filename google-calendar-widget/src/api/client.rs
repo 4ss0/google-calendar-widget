@@ -1,7 +1,21 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 const BASE: &str = "https://www.googleapis.com/calendar/v3";
+
+static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http() -> &'static reqwest::Client {
+    HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("client http")
+    })
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct EventDateTime {
@@ -74,35 +88,24 @@ fn convert(e: GoogleEvent) -> Option<CalendarEvent> {
     })
 }
 
-pub async fn fetch_month_events(
+pub async fn fetch_events(
     access_token: &str,
     calendar_id: &str,
-    year: i32,
-    month: u32,
+    time_min: DateTime<Utc>,
+    time_max: DateTime<Utc>,
 ) -> anyhow::Result<Vec<CalendarEvent>> {
-    let start = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap();
-    let (end_year, end_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    let end = Utc
-        .with_ymd_and_hms(end_year, end_month, 1, 0, 0, 0)
-        .unwrap();
-
     let url = format!(
         "{}/calendars/{}/events",
         BASE,
         urlencoding::encode(calendar_id)
     );
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http()
         .get(&url)
         .bearer_auth(access_token)
         .query(&[
-            ("timeMin", start.to_rfc3339()),
-            ("timeMax", end.to_rfc3339()),
+            ("timeMin", time_min.to_rfc3339()),
+            ("timeMax", time_max.to_rfc3339()),
             ("singleEvents", "true".to_string()),
             ("orderBy", "startTime".to_string()),
             ("maxResults", "2500".to_string()),
@@ -145,8 +148,7 @@ pub async fn create_event(
         },
         color_id: color_id.map(|s| s.to_string()),
     };
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http()
         .post(&url)
         .bearer_auth(access_token)
         .json(&body)
@@ -186,8 +188,7 @@ pub async fn update_event(
         },
         color_id: color_id.map(|s| s.to_string()),
     };
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http()
         .put(&url)
         .bearer_auth(access_token)
         .json(&body)
@@ -213,8 +214,7 @@ pub async fn delete_event(
         urlencoding::encode(calendar_id),
         urlencoding::encode(event_id)
     );
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http()
         .delete(&url)
         .bearer_auth(access_token)
         .send()

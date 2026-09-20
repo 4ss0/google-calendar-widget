@@ -22,6 +22,7 @@ rand = "0.8"
 url = "2"
 open = "5"
 auto-launch = "0.5"
+tray-icon = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

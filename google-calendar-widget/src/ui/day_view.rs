@@ -1,28 +1,27 @@
+use super::common::{render_event_box, EventBoxStyle};
 use super::layout::event_font;
-use super::month_view::parse_hex_color;
-use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
+use crate::app::EventIndex;
+use crate::ui::AppTheme;
 use chrono::NaiveDate;
-use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{column, container, mouse_area, scrollable, text};
-use iced::{Background, Border, Color, Element, Length, Theme};
+use iced::{Element, Length};
 
 pub fn build_view<'a>(
     selected: NaiveDate,
-    events: &'a [CalendarEvent],
+    index: &'a EventIndex,
     palette: &'a ColorPalette,
+    theme: &'a AppTheme,
     width: f32,
+    height: f32,
 ) -> Element<'a, crate::Message> {
     let ef = event_font(width);
-    let day_events: Vec<&CalendarEvent> = events
-        .iter()
-        .filter(|e| e.start.with_timezone(&chrono::Local).date_naive() == selected)
-        .collect();
+    let day_events = index.for_date(selected);
 
     let title = selected.format("%A %d %B %Y").to_string();
 
     let header: Element<'a, crate::Message> = container(
-        text(title).size(ef + 6).style(Color::from_rgb(0.15, 0.15, 0.2)),
+        text(title).size(ef + 6).style(theme.text),
     )
     .padding(8)
     .width(Length::Fill)
@@ -32,78 +31,52 @@ pub fn build_view<'a>(
     let mut evs: Vec<Element<'a, crate::Message>> = Vec::new();
     if day_events.is_empty() {
         evs.push(
-            container(text("Nessun evento").size(ef).style(Color::from_rgb(0.5, 0.5, 0.55)))
-                .padding(20)
-                .width(Length::Fill)
-                .center_x()
-                .into(),
+            container(
+                text("Nessun evento")
+                    .size(ef)
+                    .style(theme.text_muted),
+            )
+            .padding(20)
+            .width(Length::Fill)
+            .center_x()
+            .into(),
         );
     } else {
         for event in day_events.iter() {
-            let bg_color = event
-                .color_id
-                .as_ref()
-                .and_then(|id| palette.background_for(id))
-                .and_then(parse_hex_color)
-                .unwrap_or(Color::from_rgb(0.55, 0.55, 0.6));
-            let fg_color = event
-                .color_id
-                .as_ref()
-                .and_then(|id| palette.foreground_for(id))
-                .and_then(parse_hex_color)
-                .unwrap_or(Color::BLACK);
-
-            let start = event.start.with_timezone(&chrono::Local);
-            let end = event.end.map(|e| e.with_timezone(&chrono::Local));
-            let time_str = match end {
-                Some(e) => format!("{} – {}", start.format("%H:%M"), e.format("%H:%M")),
-                None => start.format("%H:%M").to_string(),
-            };
-
-            let ev_box: Element<'a, crate::Message> = container(
-                column(vec![
-                    text(time_str)
-                        .size(ef.saturating_sub(1))
-                        .style(fg_color)
-                        .into(),
-                    text(event.summary.clone())
-                        .size(ef + 2)
-                        .style(fg_color)
-                        .into(),
-                ])
-                .spacing(2),
-            )
-            .padding(10)
-            .width(Length::Fill)
-            .style(move |_theme: &Theme| ContainerAppearance {
-                text_color: Some(fg_color),
-                background: Some(Background::Color(bg_color)),
-                border: Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 8.0.into(),
-                },
-                shadow: Default::default(),
-            })
-            .into();
-
-            let ev_click: Element<'a, crate::Message> = mouse_area(ev_box)
-                .on_press(crate::Message::OpenEditForm((*event).clone()))
-                .into();
-            evs.push(ev_click);
+            evs.push(render_event_box(event, palette, EventBoxStyle::day(ef)));
         }
     }
 
-    let body: Element<'a, crate::Message> = scrollable(
-        container(column(evs).spacing(6))
-            .width(Length::Fill)
-            .padding(6),
-    )
-    .height(Length::Fill)
-    .into();
+    let ev_col: Element<'a, crate::Message> = column(evs).spacing(6).into();
 
-    column(vec![header, body])
+    let available = (height - 140.0).max(0.0);
+    let event_h = (ef as f32) * 3.0 + 40.0;
+    let max_events = (available / event_h).floor() as usize;
+
+    let needs_scroll = !day_events.is_empty() && day_events.len() > max_events;
+
+    let body: Element<'a, crate::Message> = if needs_scroll {
+        scrollable(
+            container(ev_col)
+                .width(Length::Fill)
+                .padding(6),
+        )
+        .height(Length::Fill)
+        .into()
+    } else {
+        container(ev_col)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(6)
+            .into()
+    };
+
+    let content: Element<'a, crate::Message> = column(vec![header, body])
         .spacing(6)
         .height(Length::Fill)
+        .into();
+
+    mouse_area(content)
+        .on_press(crate::Message::OpenCreateFormForDate(selected))
         .into()
 }

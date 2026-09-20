@@ -185,3 +185,8 @@ pub fn load_refresh_token() -> Option<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
+
+pub fn delete_refresh_token() {
+    let path = AppConfig::token_path();
+    let _ = std::fs::remove_file(path);
+}
