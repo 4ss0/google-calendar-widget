@@ -40,6 +40,7 @@ pub enum Message {
     Reauthenticate,
     ApplyWindowEffects,
     ApplyWindowEffectsDeferred,
+    DeleteTaskbarTab,
     KeepAtBottom,
     IncreaseTransparency,
     DecreaseTransparency,

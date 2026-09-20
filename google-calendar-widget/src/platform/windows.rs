@@ -1,7 +1,11 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use windows::core::PCWSTR;
+use windows::core::{IUnknown, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+};
+use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos,
     ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_BOTTOM, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE,
@@ -95,5 +99,21 @@ pub fn set_window_alpha(hwnd_raw: isize, alpha: f32) {
         let hwnd = HWND(hwnd_raw as *mut _);
         let b_alpha = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), b_alpha, LWA_ALPHA);
+    }
+}
+
+pub fn delete_taskbar_tab(hwnd_raw: isize) {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let created: windows::core::Result<ITaskbarList> = CoCreateInstance(
+            &TaskbarList,
+            None::<&IUnknown>,
+            CLSCTX_INPROC_SERVER,
+        );
+        if let Ok(taskbar) = created {
+            let _ = taskbar.HrInit();
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let _ = taskbar.DeleteTab(hwnd);
+        }
     }
 }

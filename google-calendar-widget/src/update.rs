@@ -156,14 +156,28 @@ impl App {
                         },
                         |_| Message::ApplyWindowEffectsDeferred,
                     );
-                    Command::batch(vec![show, deferred])
-                } else {
-                    Command::perform(
+                    let delete_tab = Command::perform(
                         async {
-                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
                         },
-                        |_| Message::ApplyWindowEffectsDeferred,
-                    )
+                        |_| Message::DeleteTaskbarTab,
+                    );
+                    Command::batch(vec![show, deferred, delete_tab])
+                } else {
+                    Command::batch(vec![
+                        Command::perform(
+                            async {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            },
+                            |_| Message::ApplyWindowEffectsDeferred,
+                        ),
+                        Command::perform(
+                            async {
+                                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                            },
+                            |_| Message::DeleteTaskbarTab,
+                        ),
+                    ])
                 }
             }
             Message::ApplyWindowEffectsDeferred => {
@@ -173,6 +187,13 @@ impl App {
                     crate::platform::windows::remove_minimize_box(hwnd);
                     crate::platform::windows::set_bottom(hwnd);
                     crate::platform::windows::set_window_alpha(hwnd, self.window_alpha);
+                }
+                Command::none()
+            }
+            Message::DeleteTaskbarTab => {
+                #[cfg(target_os = "windows")]
+                if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
+                    crate::platform::windows::delete_taskbar_tab(hwnd);
                 }
                 Command::none()
             }
