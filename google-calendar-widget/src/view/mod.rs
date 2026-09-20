@@ -54,7 +54,7 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
     .into();
 
     let cancel_btn: Element<Message> = if app.state_before_setup.is_some() {
-        button(text("Annulla").size(12))
+        button(text("Cancel").size(12))
             .on_press(Message::SetupCancel)
             .padding([4, 10])
             .into()
@@ -110,10 +110,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
             let t = theme.text;
             container(
                 column(vec![
-                    text("Autorizzazione Google Calendar").size(20).style(t).into(),
-                    text("Il browser è stato aperto per l'autorizzazione.").style(t).into(),
-                    text("Completa il login e autorizza l'accesso.").style(t).into(),
-                    text("In attesa di conferma...").style(t).into(),
+                    text("Google Calendar Authorization").size(20).style(t).into(),
+                    text("The browser has been opened for authorization.").style(t).into(),
+                    text("Complete login and grant access.").style(t).into(),
+                    text("Waiting for confirmation...").style(t).into(),
                 ])
                 .spacing(12),
             )
@@ -123,7 +123,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .into()
         }
         AppState::Loading => container(
-            text("Caricamento eventi...").size(18).style(theme.text),
+            text("Loading events...").size(18).style(theme.text),
         )
         .padding(20)
         .width(Length::Fill)
@@ -134,7 +134,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
             if let Some(err) = &app.last_error {
                 items.push(
-                    text(format!("Errore: {}", err))
+                    text(format!("Error: {}", err))
                         .size(13)
                         .style(theme.text)
                         .into(),
@@ -163,14 +163,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .into()
         }
         AppState::Error(e) => {
-            let msg: Element<Message> = text(format!("Errore: {}", e))
+            let msg: Element<Message> = text(format!("Error: {}", e))
                 .size(16)
                 .style(theme.text)
                 .into();
-            let retry_btn: Element<Message> = iced::widget::button("Riprova autenticazione")
+            let retry_btn: Element<Message> = iced::widget::button("Retry authentication")
                 .on_press(Message::Reauthenticate)
                 .into();
-            let settings_btn: Element<Message> = iced::widget::button("Configura credenziali")
+            let settings_btn: Element<Message> = iced::widget::button("Configure credentials")
                 .on_press(Message::SetupReconfigure)
                 .into();
             let buttons: Element<Message> =

@@ -8,6 +8,7 @@ mod config;
 mod crypto;
 mod date_utils;
 mod handlers;
+mod log;
 mod messages;
 mod persistence;
 mod platform;
@@ -27,6 +28,18 @@ use iced::{Application, Command, Element, Point, Size, Subscription, Theme};
 fn main() -> iced::Result {
     let started_minimized = std::env::args().any(|a| a == "--minimized");
     dotenvy::dotenv().ok();
+
+    crate::log::line();
+    crate::log::write("=== app starting ===");
+    crate::log::write(&format!(
+        "args: {:?}",
+        std::env::args().collect::<Vec<String>>()
+    ));
+    crate::log::write(&format!("log file: {:?}", crate::log::path()));
+    crate::log::write(&format!(
+        "config dir: {:?}",
+        AppConfig::config_dir()
+    ));
 
     let saved = WindowState::load();
     let (size, position) = match &saved {
@@ -65,6 +78,8 @@ impl Application for App {
         tray::init();
         let today = chrono::Local::now().date_naive();
         let autostart_enabled = autostart::is_autostart_enabled();
+        autostart::heal_autostart();
+        crate::log::write(&format!("autostart enabled: {}", autostart_enabled));
         let started_minimized = std::env::args().any(|a| a == "--minimized");
         let palette = ColorPalette::standard();
 
@@ -84,6 +99,7 @@ impl Application for App {
         };
 
         let loaded_config = AppConfig::load();
+        crate::log::write(&format!("config loaded: {}", loaded_config.is_some()));
 
         let (config, initial_state, setup_form) = match loaded_config {
             Some(cfg) => (
@@ -130,6 +146,10 @@ impl Application for App {
             let client_id = config.client_id.clone();
             let client_secret = config.client_secret.clone();
             let existing_refresh = auth::oauth::load_refresh_token();
+            crate::log::write(&format!(
+                "existing refresh token: {}",
+                existing_refresh.is_some()
+            ));
 
             let auth_cmd = if let Some(rt) = existing_refresh {
                 Command::perform(

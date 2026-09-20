@@ -42,9 +42,12 @@ pub async fn run_full_auth_flow(
     client_id: &str,
     client_secret: &str,
 ) -> anyhow::Result<StoredToken> {
+    crate::log::write("auth: starting full auth flow");
+
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{}/oauth/callback", port);
+    crate::log::write(&format!("auth: redirect_uri = {}", redirect_uri));
 
     let (verifier, challenge) = generate_pkce();
 
@@ -82,9 +85,9 @@ pub async fn run_full_auth_flow(
     }
 
     let body = if code.is_some() {
-        "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Autorizzazione completata</h2><p>Puoi chiudere questa finestra e tornare al widget.</p></body></html>"
+        "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Authorization complete</h2><p>You can close this window and return to the widget.</p></body></html>"
     } else {
-        "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Errore di autorizzazione</h2><p>Controlla il widget per i dettagli.</p></body></html>"
+        "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Authorization error</h2><p>Check the widget for details.</p></body></html>"
     };
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -95,9 +98,11 @@ pub async fn run_full_auth_flow(
     let _ = stream.shutdown().await;
 
     if let Some(e) = error {
-        anyhow::bail!("Errore autorizzazione da Google: {}", e);
+        crate::log::write(&format!("auth: error from google: {}", e));
+        anyhow::bail!("Authorization error from Google: {}", e);
     }
-    let code = code.ok_or_else(|| anyhow::anyhow!("Codice non trovato nel redirect"))?;
+    let code = code.ok_or_else(|| anyhow::anyhow!("Code not found in redirect"))?;
+    crate::log::write("auth: received authorization code");
 
     let client = reqwest::Client::new();
     let params = [
@@ -111,9 +116,10 @@ pub async fn run_full_auth_flow(
     let resp = client.post(TOKEN_URL).form(&params).send().await?;
     let text = resp.text().await?;
     let token: TokenResponse = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("Risposta token non valida: {} - {}", e, text))?;
+        .map_err(|e| anyhow::anyhow!("Invalid token response: {} - {}", e, text))?;
 
     if let Some(err) = &token.error {
+        crate::log::write(&format!("auth: token error: {}", err));
         anyhow::bail!(
             "{} - {}",
             err,
@@ -123,8 +129,13 @@ pub async fn run_full_auth_flow(
 
     let access_token = token
         .access_token
-        .ok_or_else(|| anyhow::anyhow!("access_token mancante"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing access_token"))?;
     let expires_at = chrono::Utc::now().timestamp() + token.expires_in.unwrap_or(3600);
+    crate::log::write(&format!(
+        "auth: token received, expires_at={}, has_refresh={}",
+        expires_at,
+        token.refresh_token.is_some()
+    ));
 
     Ok(StoredToken {
         access_token,
@@ -138,6 +149,8 @@ pub async fn refresh_access_token(
     client_secret: &str,
     refresh_token: &str,
 ) -> anyhow::Result<StoredToken> {
+    crate::log::write("auth: refreshing access token");
+
     let client = reqwest::Client::new();
     let params = [
         ("client_id", client_id),
@@ -148,9 +161,10 @@ pub async fn refresh_access_token(
     let resp = client.post(TOKEN_URL).form(&params).send().await?;
     let text = resp.text().await?;
     let token: TokenResponse = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("Risposta refresh non valida: {} - {}", e, text))?;
+        .map_err(|e| anyhow::anyhow!("Invalid refresh response: {} - {}", e, text))?;
 
     if let Some(err) = &token.error {
+        crate::log::write(&format!("auth: refresh error: {} - {:?}", err, token.error_description));
         anyhow::bail!(
             "{} - {}",
             err,
@@ -160,8 +174,9 @@ pub async fn refresh_access_token(
 
     let access_token = token
         .access_token
-        .ok_or_else(|| anyhow::anyhow!("access_token mancante nel refresh"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing access_token in refresh"))?;
     let expires_at = chrono::Utc::now().timestamp() + token.expires_in.unwrap_or(3600);
+    crate::log::write(&format!("auth: refreshed, expires_at={}", expires_at));
 
     Ok(StoredToken {
         access_token,
@@ -171,32 +186,80 @@ pub async fn refresh_access_token(
 }
 
 pub fn save_refresh_token(token: &str) -> anyhow::Result<()> {
-    crate::crypto::save_encrypted(&AppConfig::token_path(), token.as_bytes())
+    let path = AppConfig::token_path();
+    crate::log::write(&format!(
+        "save_refresh_token: path={:?} len={}",
+        path,
+        token.len()
+    ));
+    match crate::crypto::save_encrypted(&path, token.as_bytes()) {
+        Ok(()) => {
+            crate::log::write("save_refresh_token: OK");
+            Ok(())
+        }
+        Err(e) => {
+            crate::log::write(&format!("save_refresh_token: ERROR {}", e));
+            Err(e)
+        }
+    }
 }
 
 pub fn load_refresh_token() -> Option<String> {
-    if let Some(bytes) = crate::crypto::load_encrypted(&AppConfig::token_path()) {
-        if let Ok(s) = String::from_utf8(bytes) {
-            let trimmed = s.trim().to_string();
-            if !trimmed.is_empty() {
-                return Some(trimmed);
+    let primary = AppConfig::token_path();
+    crate::log::write(&format!(
+        "load_refresh_token: primary path={:?} exists={}",
+        primary,
+        primary.exists()
+    ));
+
+    if let Some(bytes) = crate::crypto::load_encrypted(&primary) {
+        crate::log::write(&format!(
+            "load_refresh_token: decrypted {} bytes",
+            bytes.len()
+        ));
+        match String::from_utf8(bytes) {
+            Ok(s) => {
+                let trimmed = s.trim().to_string();
+                if !trimmed.is_empty() {
+                    crate::log::write(&format!(
+                        "load_refresh_token: OK ({} chars)",
+                        trimmed.len()
+                    ));
+                    return Some(trimmed);
+                }
+                crate::log::write("load_refresh_token: decrypted string is empty");
+            }
+            Err(e) => {
+                crate::log::write(&format!(
+                    "load_refresh_token: invalid UTF-8: {}",
+                    e
+                ));
             }
         }
-        let _ = std::fs::remove_file(AppConfig::token_path());
+        crate::log::write(
+            "load_refresh_token: NOT deleting file on failure (fix), returning None",
+        );
+    } else {
+        crate::log::write("load_refresh_token: load_encrypted returned None");
     }
 
-    if let Ok(s) = std::fs::read_to_string(AppConfig::legacy_token_path()) {
+    let legacy = AppConfig::legacy_token_path();
+    if let Ok(s) = std::fs::read_to_string(&legacy) {
         let trimmed = s.trim().to_string();
         if !trimmed.is_empty() {
+            crate::log::write("load_refresh_token: migrated from legacy file");
             let _ = save_refresh_token(&trimmed);
-            let _ = std::fs::remove_file(AppConfig::legacy_token_path());
+            let _ = std::fs::remove_file(&legacy);
             return Some(trimmed);
         }
     }
+
+    crate::log::write("load_refresh_token: NONE");
     None
 }
 
 pub fn delete_refresh_token() {
+    crate::log::write("delete_refresh_token: called");
     let _ = std::fs::remove_file(AppConfig::token_path());
     let _ = std::fs::remove_file(AppConfig::legacy_token_path());
 }

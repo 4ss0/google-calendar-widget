@@ -86,7 +86,7 @@ fn convert(e: GoogleEvent) -> Option<CalendarEvent> {
         .and_then(|edt| parse_datetime(edt).map(|(d, _)| d));
     Some(CalendarEvent {
         id: e.id,
-        summary: e.summary.unwrap_or_else(|| "(senza titolo)".into()),
+        summary: e.summary.unwrap_or_else(|| "(no title)".into()),
         start,
         end,
         color_id: e.color_id,
@@ -166,7 +166,7 @@ pub async fn create_event(
         anyhow::bail!("API error {}: {}", status, body);
     }
     let event: GoogleEvent = resp.json().await?;
-    convert(event).ok_or_else(|| anyhow::anyhow!("Evento restituito non valido"))
+    convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
 pub async fn update_event(
@@ -206,7 +206,7 @@ pub async fn update_event(
         anyhow::bail!("API error {}: {}", status, body);
     }
     let event: GoogleEvent = resp.json().await?;
-    convert(event).ok_or_else(|| anyhow::anyhow!("Evento restituito non valido"))
+    convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
 pub async fn delete_event(

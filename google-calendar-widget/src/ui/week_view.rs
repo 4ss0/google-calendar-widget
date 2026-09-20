@@ -49,7 +49,7 @@ fn render_day_column<'a>(
     ef: u16,
     height: f32,
 ) -> Element<'a, crate::Message> {
-    let weekday_name = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+    let weekday_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         [date.weekday().num_days_from_monday() as usize];
 
     let header_color = if is_today { Color::WHITE } else { theme.text };

@@ -21,9 +21,9 @@ static TRAY_IDS: OnceLock<TrayIds> = OnceLock::new();
 
 pub fn init() {
     let menu = Menu::new();
-    let show_item = MenuItem::new("Mostra", true, None);
-    let hide_item = MenuItem::new("Nascondi", true, None);
-    let quit_item = MenuItem::new("Esci", true, None);
+    let show_item = MenuItem::new("Show", true, None);
+    let hide_item = MenuItem::new("Hide", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
 
     let ids = TrayIds {
         show: show_item.id().clone(),

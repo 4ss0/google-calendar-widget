@@ -15,19 +15,19 @@ pub fn view_form<'a>(
 ) -> Element<'a, Message> {
     let t = theme.text;
 
-    let title_label: Element<Message> = text("Titolo:").style(t).into();
-    let title_input: Element<Message> = text_input("Titolo evento", &form.title)
+    let title_label: Element<Message> = text("Title:").style(t).into();
+    let title_input: Element<Message> = text_input("Event title", &form.title)
         .on_input(Message::FormTitleChanged)
         .width(Length::Fill)
         .into();
     let row1: Element<Message> = row(vec![title_label, title_input]).spacing(8).into();
 
-    let start_date_label: Element<Message> = text("Data:").style(t).into();
+    let start_date_label: Element<Message> = text("Date:").style(t).into();
     let start_date_input: Element<Message> = text_input("YYYY-MM-DD", &form.date)
         .on_input(Message::FormDateChanged)
         .width(Length::Fixed(140.0))
         .into();
-    let end_date_label: Element<Message> = text("Fine data:").style(t).into();
+    let end_date_label: Element<Message> = text("End date:").style(t).into();
     let end_date_input: Element<Message> = text_input("YYYY-MM-DD", &form.end_date)
         .on_input(Message::FormEndDateChanged)
         .width(Length::Fixed(140.0))
@@ -41,12 +41,12 @@ pub fn view_form<'a>(
     .spacing(8)
     .into();
 
-    let start_label: Element<Message> = text("Inizio:").style(t).into();
+    let start_label: Element<Message> = text("Start:").style(t).into();
     let start_input: Element<Message> = text_input("HH:MM", &form.start_time)
         .on_input(Message::FormStartChanged)
         .width(Length::Fixed(90.0))
         .into();
-    let end_label: Element<Message> = text("Fine:").style(t).into();
+    let end_label: Element<Message> = text("End:").style(t).into();
     let end_input: Element<Message> = text_input("HH:MM", &form.end_time)
         .on_input(Message::FormEndChanged)
         .width(Length::Fixed(90.0))
@@ -55,7 +55,7 @@ pub fn view_form<'a>(
         .spacing(8)
         .into();
 
-    let color_label: Element<Message> = text("Colore:").style(t).into();
+    let color_label: Element<Message> = text("Color:").style(t).into();
 
     let mut sorted_ids: Vec<String> = palette.event_colors.keys().cloned().collect();
     sorted_ids.sort_by_key(|s| s.parse::<u32>().unwrap_or(0));
@@ -103,25 +103,25 @@ pub fn view_form<'a>(
     let row4: Element<Message> = row(color_row_items).spacing(6).into();
 
     let save_btn: Element<Message> = if saving {
-        button(text("Salvataggio...").size(13)).into()
+        button(text("Saving...").size(13)).into()
     } else {
-        button("Salva").on_press(Message::SaveEvent).into()
+        button("Save").on_press(Message::SaveEvent).into()
     };
 
     let cancel_btn: Element<Message> = if saving {
-        button(text("Attendi...").size(13)).into()
+        button(text("Please wait...").size(13)).into()
     } else {
-        button("Annulla").on_press(Message::CloseForm).into()
+        button("Cancel").on_press(Message::CloseForm).into()
     };
 
     let mut actions: Vec<Element<Message>> = vec![save_btn, cancel_btn];
 
     if matches!(form.mode, FormMode::Edit(_)) {
         if saving {
-            actions.push(text("Operazione in corso...").size(13).style(t).into());
+            actions.push(text("Operation in progress...").size(13).style(t).into());
         } else if form.confirm_delete {
-            let warning: Element<Message> = text("Sei sicuro?").size(13).style(t).into();
-            let yes_btn: Element<Message> = button("Sì, elimina")
+            let warning: Element<Message> = text("Are you sure?").size(13).style(t).into();
+            let yes_btn: Element<Message> = button("Yes, delete")
                 .on_press(Message::DeleteEvent)
                 .into();
             let no_btn: Element<Message> =
@@ -130,7 +130,7 @@ pub fn view_form<'a>(
             actions.push(yes_btn);
             actions.push(no_btn);
         } else {
-            let del_btn: Element<Message> = button("Elimina")
+            let del_btn: Element<Message> = button("Delete")
                 .on_press(Message::RequestDeleteEvent)
                 .into();
             actions.push(del_btn);

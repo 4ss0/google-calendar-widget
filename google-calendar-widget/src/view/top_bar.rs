@@ -32,7 +32,7 @@ pub fn view_top_bar<'a>(
         ui::Layout::Day => app.selected.format("%d/%m").to_string(),
     };
 
-    let theme_label = if app.theme.is_dark { "Chiaro" } else { "Scuro" };
+    let theme_label = if app.theme.is_dark { "Light" } else { "Dark" };
 
     let prev_btn: Element<Message> = button(text("<").size(16))
         .on_press(Message::Prev)
@@ -43,7 +43,7 @@ pub fn view_top_bar<'a>(
         .padding([2, 10])
         .into();
 
-    let today_btn: Element<Message> = button(text("Oggi").size(13))
+    let today_btn: Element<Message> = button(text("Today").size(13))
         .on_press(Message::Today)
         .padding([4, 10])
         .into();
@@ -82,7 +82,7 @@ pub fn view_top_bar<'a>(
         .padding([4, 8])
         .into();
 
-    let settings_btn: Element<Message> = button(text("Set").size(11))
+    let settings_btn: Element<Message> = button(text("Cfg").size(11))
         .on_press(Message::SetupReconfigure)
         .padding([4, 8])
         .into();

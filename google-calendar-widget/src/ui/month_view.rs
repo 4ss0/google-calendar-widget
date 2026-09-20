@@ -37,7 +37,7 @@ pub fn build_view<'a>(
     let rows_for_events = ((cell_h - day_label_h - 8.0) / event_h).floor();
     let max_events = (rows_for_events as usize).clamp(1, 6);
 
-    let weekdays = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
+    let weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     let header: Vec<Element<'a, crate::Message>> = weekdays
         .iter()
         .enumerate()

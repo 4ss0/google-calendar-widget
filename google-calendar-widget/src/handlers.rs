@@ -19,7 +19,7 @@ impl App {
     pub fn reveal_window(&mut self) -> Command<Message> {
         if self.started_minimized {
             self.started_minimized = false;
-            iced::window::change_mode(iced::window::Id::MAIN, iced::window::Mode::Windowed)
+            Self::show_window_with_effects()
         } else {
             Command::none()
         }
@@ -82,28 +82,28 @@ impl App {
         let start_date = match chrono::NaiveDate::parse_from_str(&form.date, "%Y-%m-%d") {
             Ok(d) => d,
             Err(_) => {
-                self.last_error = Some("Data inizio non valida (YYYY-MM-DD)".into());
+                self.last_error = Some("Invalid start date (YYYY-MM-DD)".into());
                 return None;
             }
         };
         let end_date = match chrono::NaiveDate::parse_from_str(&form.end_date, "%Y-%m-%d") {
             Ok(d) => d,
             Err(_) => {
-                self.last_error = Some("Data fine non valida (YYYY-MM-DD)".into());
+                self.last_error = Some("Invalid end date (YYYY-MM-DD)".into());
                 return None;
             }
         };
         let start_time = match chrono::NaiveTime::parse_from_str(&form.start_time, "%H:%M") {
             Ok(t) => t,
             Err(_) => {
-                self.last_error = Some("Ora inizio non valida (HH:MM)".into());
+                self.last_error = Some("Invalid start time (HH:MM)".into());
                 return None;
             }
         };
         let end_time = match chrono::NaiveTime::parse_from_str(&form.end_time, "%H:%M") {
             Ok(t) => t,
             Err(_) => {
-                self.last_error = Some("Ora fine non valida (HH:MM)".into());
+                self.last_error = Some("Invalid end time (HH:MM)".into());
                 return None;
             }
         };
@@ -115,7 +115,7 @@ impl App {
             match chrono::TimeZone::from_local_datetime(&chrono::Local, &start_naive).single() {
                 Some(dt) => dt.with_timezone(&chrono::Utc),
                 None => {
-                    self.last_error = Some("Ora inizio ambigua".into());
+                    self.last_error = Some("Ambiguous start time".into());
                     return None;
                 }
             };
@@ -123,14 +123,14 @@ impl App {
             match chrono::TimeZone::from_local_datetime(&chrono::Local, &end_naive).single() {
                 Some(dt) => dt.with_timezone(&chrono::Utc),
                 None => {
-                    self.last_error = Some("Ora fine ambigua".into());
+                    self.last_error = Some("Ambiguous end time".into());
                     return None;
                 }
             };
 
         if end_utc <= start_utc {
             self.last_error =
-                Some("La data/ora di fine deve essere successiva all'inizio".into());
+                Some("End date/time must be after start date/time".into());
             return None;
         }
 

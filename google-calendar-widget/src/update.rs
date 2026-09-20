@@ -11,6 +11,26 @@ use tray_icon::TrayIconEvent;
 const MIN_WINDOW_ALPHA: f32 = 0.55;
 
 impl App {
+    pub fn show_window_with_effects() -> Command<Message> {
+        let show = iced::window::change_mode(
+            iced::window::Id::MAIN,
+            iced::window::Mode::Windowed,
+        );
+        let deferred = Command::perform(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            },
+            |_| Message::ApplyWindowEffectsDeferred,
+        );
+        let delete_tab = Command::perform(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            },
+            |_| Message::DeleteTaskbarTab,
+        );
+        Command::batch(vec![show, deferred, delete_tab])
+    }
+
     pub fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::WindowResized(size) => {
@@ -140,29 +160,13 @@ impl App {
                 Command::none()
             }
             Message::AutostartToggled(Err(e)) => {
-                self.last_error = Some(format!("Errore autostart: {}", e));
+                self.last_error = Some(format!("Autostart error: {}", e));
                 Command::none()
             }
             Message::ApplyWindowEffects => {
                 if !self.started_minimized {
                     self.started_minimized = true;
-                    let show = iced::window::change_mode(
-                        iced::window::Id::MAIN,
-                        iced::window::Mode::Windowed,
-                    );
-                    let deferred = Command::perform(
-                        async {
-                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                        },
-                        |_| Message::ApplyWindowEffectsDeferred,
-                    );
-                    let delete_tab = Command::perform(
-                        async {
-                            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-                        },
-                        |_| Message::DeleteTaskbarTab,
-                    );
-                    Command::batch(vec![show, deferred, delete_tab])
+                    Self::show_window_with_effects()
                 } else {
                     Command::batch(vec![
                         Command::perform(
@@ -215,7 +219,7 @@ impl App {
                 self.fetch_command_now(calendar_id, token.access_token, token.expires_at)
             }
             Message::TokenPolled(Err(e)) => {
-                self.state = AppState::Error(format!("Errore autenticazione: {}", e));
+                self.state = AppState::Error(format!("Authentication error: {}", e));
                 self.reveal_window()
             }
             Message::DataFetched(api_result) => {
@@ -229,7 +233,7 @@ impl App {
                         self.reveal_window()
                     }
                     Err(e) => {
-                        self.state = AppState::Error(format!("Errore dati: {}", e));
+                        self.state = AppState::Error(format!("Data error: {}", e));
                         self.reveal_window()
                     }
                 }
@@ -488,10 +492,7 @@ impl App {
             }
             Message::PollTray => {
                 if TrayIconEvent::receiver().try_recv().is_ok() {
-                    return iced::window::change_mode(
-                        iced::window::Id::MAIN,
-                        iced::window::Mode::Windowed,
-                    );
+                    return Self::show_window_with_effects();
                 }
                 if let Ok(event) = MenuEvent::receiver().try_recv() {
                     if let Some(msg) = tray::handle_menu_event(event) {
@@ -501,10 +502,7 @@ impl App {
                 Command::none()
             }
             Message::TrayEvent(msg) => match msg {
-                crate::tray::TrayMessage::Show => iced::window::change_mode(
-                    iced::window::Id::MAIN,
-                    iced::window::Mode::Windowed,
-                ),
+                crate::tray::TrayMessage::Show => Self::show_window_with_effects(),
                 crate::tray::TrayMessage::Hide => iced::window::change_mode(
                     iced::window::Id::MAIN,
                     iced::window::Mode::Hidden,
@@ -542,7 +540,7 @@ impl App {
 
                 if client_id.is_empty() || client_secret.is_empty() {
                     self.setup_form.error =
-                        Some("Client ID e Client Secret sono obbligatori.".to_string());
+                        Some("Client ID and Client Secret are required.".to_string());
                     return Command::none();
                 }
 
@@ -587,7 +585,7 @@ impl App {
                     }
                     Err(e) => {
                         self.setup_form.error =
-                            Some(format!("Errore nel salvataggio: {}", e));
+                            Some(format!("Error saving: {}", e));
                         Command::none()
                     }
                 }

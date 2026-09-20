@@ -39,7 +39,7 @@ pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("CryptProtectData: {}", e))?;
 
         if out_blob.pbData.is_null() || out_blob.cbData == 0 {
-            anyhow::bail!("CryptProtectData ha restituito un blob vuoto");
+            anyhow::bail!("CryptProtectData returned empty blob");
         }
 
         let result =
@@ -68,7 +68,7 @@ pub fn unprotect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("CryptUnprotectData: {}", e))?;
 
         if out_blob.pbData.is_null() || out_blob.cbData == 0 {
-            anyhow::bail!("CryptUnprotectData ha restituito un blob vuoto");
+            anyhow::bail!("CryptUnprotectData returned empty blob");
         }
 
         let result =
@@ -82,15 +82,57 @@ pub fn unprotect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 pub fn save_encrypted(path: &Path, plaintext: &[u8]) -> anyhow::Result<()> {
-    let blob = protect(plaintext)?;
+    crate::log::write(&format!("crypto: protect {} bytes", plaintext.len()));
+    let blob = match protect(plaintext) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log::write(&format!("crypto: protect failed: {}", e));
+            return Err(e);
+        }
+    };
+    crate::log::write(&format!("crypto: protected blob {} bytes", blob.len()));
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            crate::log::write(&format!("crypto: create_dir_all failed: {}", e));
+            return Err(e.into());
+        }
     }
-    std::fs::write(path, blob)?;
-    Ok(())
+    match std::fs::write(path, &blob) {
+        Ok(()) => {
+            crate::log::write(&format!("crypto: wrote {:?}", path));
+            Ok(())
+        }
+        Err(e) => {
+            crate::log::write(&format!("crypto: write {:?} failed: {}", path, e));
+            Err(e.into())
+        }
+    }
 }
 
 pub fn load_encrypted(path: &Path) -> Option<Vec<u8>> {
-    let blob = std::fs::read(path).ok()?;
-    unprotect(&blob).ok()
+    let blob = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log::write(&format!(
+                "crypto: read {:?} failed: {}",
+                path, e
+            ));
+            return None;
+        }
+    };
+    crate::log::write(&format!(
+        "crypto: read {:?}, {} bytes",
+        path,
+        blob.len()
+    ));
+    match unprotect(&blob) {
+        Ok(v) => {
+            crate::log::write(&format!("crypto: unprotected {} bytes", v.len()));
+            Some(v)
+        }
+        Err(e) => {
+            crate::log::write(&format!("crypto: unprotect failed: {}", e));
+            None
+        }
+    }
 }

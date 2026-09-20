@@ -7,21 +7,21 @@ pub fn view_setup<'a>(app: &'a App, form: &'a SetupForm) -> Element<'a, Message>
     let theme = &app.theme;
     let t = theme.text;
 
-    let title: Element<Message> = text("Benvenuto in Google Calendar Widget")
+    let title: Element<Message> = text("Welcome to Google Calendar Widget")
         .size(22)
         .style(t)
         .into();
 
     let subtitle: Element<Message> = text(
-        "Per iniziare, inserisci le credenziali OAuth della tua applicazione Google Cloud.",
+        "To get started, enter the OAuth credentials of your Google Cloud application.",
     )
     .size(13)
     .style(theme.text_muted)
     .into();
 
     let help: Element<Message> = text(
-        "Se non le hai, crea un progetto su console.cloud.google.com, abilita l'API Calendar, \
-         crea credenziali OAuth di tipo \"App desktop\" e copia qui Client ID e Client Secret.",
+        "If you don't have them, create a project on console.cloud.google.com, enable the Calendar API, \
+         create OAuth credentials of type \"Desktop app\" and paste the Client ID and Client Secret here.",
     )
     .size(11)
     .style(theme.text_dim)
@@ -41,11 +41,12 @@ pub fn view_setup<'a>(app: &'a App, form: &'a SetupForm) -> Element<'a, Message>
         "GOCSPX-xxxxxxxxxxxxxxxxxxxx",
         &form.client_secret,
     )
+    .secure(true)
     .on_input(Message::SetupClientSecretChanged)
     .width(Length::Fill)
     .into();
 
-    let calendar_label: Element<Message> = text("Calendar ID (opzionale)").size(13).style(t).into();
+    let calendar_label: Element<Message> = text("Calendar ID (optional)").size(13).style(t).into();
     let calendar_input: Element<Message> = text_input("primary", &form.calendar_id)
         .on_input(Message::SetupCalendarIdChanged)
         .width(Length::Fixed(220.0))
@@ -60,7 +61,7 @@ pub fn view_setup<'a>(app: &'a App, form: &'a SetupForm) -> Element<'a, Message>
         text("").size(12).into()
     };
 
-    let submit_btn: Element<Message> = button(text("Salva e continua").size(14))
+    let submit_btn: Element<Message> = button(text("Save and continue").size(14))
         .on_press(Message::SetupSubmit)
         .padding([8, 18])
         .into();

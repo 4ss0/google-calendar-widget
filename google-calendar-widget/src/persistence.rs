@@ -12,7 +12,7 @@ pub async fn ensure_token(
     if expires_at - now > 60 {
         return Ok((token.to_string(), expires_at, None));
     }
-    let rt = load_refresh_token().ok_or_else(|| "Refresh token non trovato".to_string())?;
+    let rt = load_refresh_token().ok_or_else(|| "Refresh token not found".to_string())?;
     let new_token = refresh_access_token(client_id, client_secret, &rt)
         .await
         .map_err(|e| e.to_string())?;
