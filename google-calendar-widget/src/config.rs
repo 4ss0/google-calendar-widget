@@ -34,7 +34,19 @@ impl AppConfig {
             .to_path_buf()
     }
 
+    pub fn config_path() -> PathBuf {
+        Self::config_dir().join("config.bin")
+    }
+
+    pub fn legacy_config_path() -> PathBuf {
+        Self::config_dir().join("config.json")
+    }
+
     pub fn token_path() -> PathBuf {
+        Self::config_dir().join("refresh_token.bin")
+    }
+
+    pub fn legacy_token_path() -> PathBuf {
         Self::config_dir().join("refresh_token.txt")
     }
 
@@ -42,18 +54,41 @@ impl AppConfig {
         Self::config_dir().join("window.json")
     }
 
-    pub fn load() -> anyhow::Result<Self> {
-        let client_id = std::env::var("GOOGLE_CLIENT_ID")
-            .map_err(|_| anyhow::anyhow!("GOOGLE_CLIENT_ID non impostata"))?;
-        let client_secret = std::env::var("GOOGLE_CLIENT_SECRET")
-            .map_err(|_| anyhow::anyhow!("GOOGLE_CLIENT_SECRET non impostata"))?;
-        let calendar_id =
-            std::env::var("GOOGLE_CALENDAR_ID").unwrap_or_else(|_| "primary".into());
-        Ok(Self {
-            client_id,
-            client_secret,
-            calendar_id,
-        })
+    pub fn load() -> Option<Self> {
+        if let Some(bytes) = crate::crypto::load_encrypted(&Self::config_path()) {
+            if let Ok(cfg) = serde_json::from_slice::<AppConfig>(&bytes) {
+                return Some(cfg);
+            }
+            let _ = std::fs::remove_file(Self::config_path());
+        }
+
+        if let Ok(content) = std::fs::read_to_string(Self::legacy_config_path()) {
+            if let Ok(cfg) = serde_json::from_str::<AppConfig>(&content) {
+                if cfg.save().is_ok() {
+                    let _ = std::fs::remove_file(Self::legacy_config_path());
+                }
+                return Some(cfg);
+            }
+        }
+
+        if let (Ok(client_id), Ok(client_secret)) = (
+            std::env::var("GOOGLE_CLIENT_ID"),
+            std::env::var("GOOGLE_CLIENT_SECRET"),
+        ) {
+            return Some(Self {
+                client_id,
+                client_secret,
+                calendar_id: std::env::var("GOOGLE_CALENDAR_ID")
+                    .unwrap_or_else(|_| "primary".into()),
+            });
+        }
+        None
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let json = serde_json::to_vec_pretty(self)?;
+        crate::crypto::save_encrypted(&Self::config_path(), &json)?;
+        Ok(())
     }
 }
 

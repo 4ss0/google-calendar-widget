@@ -79,10 +79,17 @@ impl App {
         let client_secret = self.config.client_secret.clone();
         let expires_at = self.expires_at;
 
-        let date = match chrono::NaiveDate::parse_from_str(&form.date, "%Y-%m-%d") {
+        let start_date = match chrono::NaiveDate::parse_from_str(&form.date, "%Y-%m-%d") {
             Ok(d) => d,
             Err(_) => {
-                self.last_error = Some("Data non valida (YYYY-MM-DD)".into());
+                self.last_error = Some("Data inizio non valida (YYYY-MM-DD)".into());
+                return None;
+            }
+        };
+        let end_date = match chrono::NaiveDate::parse_from_str(&form.end_date, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => {
+                self.last_error = Some("Data fine non valida (YYYY-MM-DD)".into());
                 return None;
             }
         };
@@ -101,8 +108,8 @@ impl App {
             }
         };
 
-        let start_naive = date.and_time(start_time);
-        let end_naive = date.and_time(end_time);
+        let start_naive = start_date.and_time(start_time);
+        let end_naive = end_date.and_time(end_time);
 
         let start_utc =
             match chrono::TimeZone::from_local_datetime(&chrono::Local, &start_naive).single() {
@@ -122,7 +129,8 @@ impl App {
             };
 
         if end_utc <= start_utc {
-            self.last_error = Some("L'ora di fine deve essere successiva all'inizio".into());
+            self.last_error =
+                Some("La data/ora di fine deve essere successiva all'inizio".into());
             return None;
         }
 

@@ -46,6 +46,7 @@ pub struct CalendarEvent {
     pub start: DateTime<Utc>,
     pub end: Option<DateTime<Utc>>,
     pub color_id: Option<String>,
+    pub all_day: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,28 +64,33 @@ struct EventBody {
     color_id: Option<String>,
 }
 
-fn parse_datetime(dt: &EventDateTime) -> Option<DateTime<Utc>> {
+fn parse_datetime(dt: &EventDateTime) -> Option<(DateTime<Utc>, bool)> {
     if let Some(s) = &dt.date_time {
-        return DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|d| d.with_timezone(&Utc));
+        let d = DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&Utc);
+        return Some((d, false));
     }
-    if let Some(d) = &dt.date {
-        let nd = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()?;
-        return Some(Utc.from_utc_datetime(&nd.and_hms_opt(0, 0, 0)?));
+    if let Some(s) = &dt.date {
+        let nd = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+        let naive = nd.and_hms_opt(0, 0, 0)?;
+        let local = chrono::Local.from_local_datetime(&naive).earliest()?;
+        return Some((local.with_timezone(&Utc), true));
     }
     None
 }
 
 fn convert(e: GoogleEvent) -> Option<CalendarEvent> {
-    let start = parse_datetime(&e.start)?;
-    let end = e.end.as_ref().and_then(parse_datetime);
+    let (start, all_day) = parse_datetime(&e.start)?;
+    let end = e
+        .end
+        .as_ref()
+        .and_then(|edt| parse_datetime(edt).map(|(d, _)| d));
     Some(CalendarEvent {
         id: e.id,
         summary: e.summary.unwrap_or_else(|| "(senza titolo)".into()),
         start,
         end,
         color_id: e.color_id,
+        all_day,
     })
 }
 

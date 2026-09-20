@@ -171,22 +171,32 @@ pub async fn refresh_access_token(
 }
 
 pub fn save_refresh_token(token: &str) -> anyhow::Result<()> {
-    let path = AppConfig::token_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, token)?;
-    Ok(())
+    crate::crypto::save_encrypted(&AppConfig::token_path(), token.as_bytes())
 }
 
 pub fn load_refresh_token() -> Option<String> {
-    std::fs::read_to_string(AppConfig::token_path())
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    if let Some(bytes) = crate::crypto::load_encrypted(&AppConfig::token_path()) {
+        if let Ok(s) = String::from_utf8(bytes) {
+            let trimmed = s.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+        let _ = std::fs::remove_file(AppConfig::token_path());
+    }
+
+    if let Ok(s) = std::fs::read_to_string(AppConfig::legacy_token_path()) {
+        let trimmed = s.trim().to_string();
+        if !trimmed.is_empty() {
+            let _ = save_refresh_token(&trimmed);
+            let _ = std::fs::remove_file(AppConfig::legacy_token_path());
+            return Some(trimmed);
+        }
+    }
+    None
 }
 
 pub fn delete_refresh_token() {
-    let path = AppConfig::token_path();
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(AppConfig::token_path());
+    let _ = std::fs::remove_file(AppConfig::legacy_token_path());
 }

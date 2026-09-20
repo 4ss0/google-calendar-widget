@@ -1,8 +1,11 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod api;
 mod app;
 mod auth;
 mod autostart;
 mod config;
+mod crypto;
 mod date_utils;
 mod handlers;
 mod messages;
@@ -34,13 +37,15 @@ fn main() -> iced::Result {
         None => (Size::new(1150.0, 850.0), Position::Default),
     };
 
+    let _ = started_minimized;
+
     App::run(iced::Settings {
         window: iced::window::Settings {
             transparent: true,
             decorations: false,
             level: iced::window::Level::Normal,
             resizable: true,
-            visible: !started_minimized,
+            visible: false,
             size,
             position,
             min_size: Some(iced::Size::new(360.0, 420.0)),
@@ -78,98 +83,105 @@ impl Application for App {
             AppTheme::light()
         };
 
-        match AppConfig::load() {
-            Ok(config) => {
-                let client_id = config.client_id.clone();
-                let client_secret = config.client_secret.clone();
-                let existing_refresh = auth::oauth::load_refresh_token();
+        let loaded_config = AppConfig::load();
 
-                let auth_cmd = if let Some(rt) = existing_refresh {
-                    Command::perform(
-                        async move {
-                            auth::oauth::refresh_access_token(&client_id, &client_secret, &rt)
-                                .await
-                                .map_err(|e| e.to_string())
-                        },
-                        Message::TokenPolled,
-                    )
-                } else {
-                    Command::perform(
-                        async move {
-                            auth::oauth::run_full_auth_flow(&client_id, &client_secret)
-                                .await
-                                .map_err(|e| e.to_string())
-                        },
-                        Message::TokenPolled,
-                    )
-                };
-
-                let platform_cmd = Command::perform(
-                    async {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    },
-                    |_| Message::ApplyWindowEffects,
-                );
-
-                (
-                    Self {
-                        config,
-                        palette: palette.clone(),
-                        theme: initial_theme.clone(),
-                        state: app::AppState::WaitingAuth,
-                        selected: today,
-                        window_size,
-                        window_position,
-                        last_cursor: Point::new(0.0, 0.0),
-                        resize_start: None,
-                        pending_window_save: false,
-                        bg_alpha: 0.65,
-                        autostart_enabled,
-                        started_minimized,
-                        menu_open: false,
-                        access_token: None,
-                        expires_at: 0,
-                        last_focus_fetch: None,
-                        form: None,
-                        saving: false,
-                        last_error: None,
-                    },
-                    Command::batch(vec![auth_cmd, platform_cmd]),
-                )
-            }
-            Err(e) => (
-                Self {
-                    config: AppConfig {
-                        client_id: String::new(),
-                        client_secret: String::new(),
-                        calendar_id: "primary".into(),
-                    },
-                    palette,
-                    theme: initial_theme,
-                    state: app::AppState::Error(format!(
-                        "Configurazione non trovata (crea il file .env): {}",
-                        e
-                    )),
-                    selected: today,
-                    window_size,
-                    window_position,
-                    last_cursor: Point::new(0.0, 0.0),
-                    resize_start: None,
-                    pending_window_save: false,
-                    bg_alpha: 0.65,
-                    autostart_enabled,
-                    started_minimized,
-                    menu_open: false,
-                    access_token: None,
-                    expires_at: 0,
-                    last_focus_fetch: None,
-                    form: None,
-                    saving: false,
-                    last_error: None,
-                },
-                Command::none(),
+        let (config, initial_state, setup_form) = match loaded_config {
+            Some(cfg) => (
+                cfg,
+                app::AppState::WaitingAuth,
+                app::SetupForm::default(),
             ),
-        }
+            None => (
+                AppConfig {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                    calendar_id: "primary".into(),
+                },
+                app::AppState::Setup,
+                app::SetupForm {
+                    calendar_id: "primary".into(),
+                    ..Default::default()
+                },
+            ),
+        };
+
+        let platform_cmd = Command::perform(
+            async {
+                #[cfg(target_os = "windows")]
+                {
+                    for _ in 0..100 {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        if crate::platform::windows::find_hwnd("Google Calendar Widget").is_some() {
+                            break;
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            },
+            |_| Message::ApplyWindowEffects,
+        );
+
+        let startup_cmd = if matches!(initial_state, app::AppState::Setup) {
+            Command::batch(vec![platform_cmd])
+        } else {
+            let client_id = config.client_id.clone();
+            let client_secret = config.client_secret.clone();
+            let existing_refresh = auth::oauth::load_refresh_token();
+
+            let auth_cmd = if let Some(rt) = existing_refresh {
+                Command::perform(
+                    async move {
+                        auth::oauth::refresh_access_token(&client_id, &client_secret, &rt)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::TokenPolled,
+                )
+            } else {
+                Command::perform(
+                    async move {
+                        auth::oauth::run_full_auth_flow(&client_id, &client_secret)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::TokenPolled,
+                )
+            };
+
+            Command::batch(vec![auth_cmd, platform_cmd])
+        };
+
+        (
+            Self {
+                config,
+                palette,
+                theme: initial_theme,
+                state: initial_state,
+                state_before_setup: None,
+                setup_form,
+                selected: today,
+                window_size,
+                window_position,
+                last_cursor: Point::new(0.0, 0.0),
+                resize_start: None,
+                pending_window_save: false,
+                bg_alpha: 0.65,
+                window_alpha: 0.75,
+                autostart_enabled,
+                started_minimized,
+                menu_open: false,
+                access_token: None,
+                expires_at: 0,
+                last_focus_fetch: None,
+                form: None,
+                saving: false,
+                last_error: None,
+            },
+            startup_cmd,
+        )
     }
 
     fn title(&self) -> String {

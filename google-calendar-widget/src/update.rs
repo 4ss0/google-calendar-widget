@@ -8,6 +8,8 @@ use iced::{Command, Size};
 use tray_icon::menu::MenuEvent;
 use tray_icon::TrayIconEvent;
 
+const MIN_WINDOW_ALPHA: f32 = 0.55;
+
 impl App {
     pub fn update(&mut self, message: Message) -> Command<Message> {
         match message {
@@ -101,11 +103,19 @@ impl App {
                 Command::none()
             }
             Message::IncreaseTransparency => {
-                self.bg_alpha = (self.bg_alpha - 0.08).max(0.10);
+                self.window_alpha = (self.window_alpha - 0.08).max(MIN_WINDOW_ALPHA);
+                #[cfg(target_os = "windows")]
+                if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
+                    crate::platform::windows::set_window_alpha(hwnd, self.window_alpha);
+                }
                 Command::none()
             }
             Message::DecreaseTransparency => {
-                self.bg_alpha = (self.bg_alpha + 0.08).min(1.0);
+                self.window_alpha = (self.window_alpha + 0.08).min(1.0);
+                #[cfg(target_os = "windows")]
+                if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
+                    crate::platform::windows::set_window_alpha(hwnd, self.window_alpha);
+                }
                 Command::none()
             }
             Message::ToggleAutostart => {
@@ -134,11 +144,35 @@ impl App {
                 Command::none()
             }
             Message::ApplyWindowEffects => {
+                if !self.started_minimized {
+                    self.started_minimized = true;
+                    let show = iced::window::change_mode(
+                        iced::window::Id::MAIN,
+                        iced::window::Mode::Windowed,
+                    );
+                    let deferred = Command::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        },
+                        |_| Message::ApplyWindowEffectsDeferred,
+                    );
+                    Command::batch(vec![show, deferred])
+                } else {
+                    Command::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        },
+                        |_| Message::ApplyWindowEffectsDeferred,
+                    )
+                }
+            }
+            Message::ApplyWindowEffectsDeferred => {
                 #[cfg(target_os = "windows")]
                 if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
-                    crate::platform::windows::set_bottom(hwnd);
                     crate::platform::windows::hide_from_taskbar(hwnd);
                     crate::platform::windows::remove_minimize_box(hwnd);
+                    crate::platform::windows::set_bottom(hwnd);
+                    crate::platform::windows::set_window_alpha(hwnd, self.window_alpha);
                 }
                 Command::none()
             }
@@ -209,7 +243,8 @@ impl App {
                 self.form = Some(crate::app::EventForm {
                     mode: FormMode::Create,
                     title: String::new(),
-                    date,
+                    date: date.clone(),
+                    end_date: date,
                     start_time: start,
                     end_time: end,
                     color_id: String::new(),
@@ -230,10 +265,12 @@ impl App {
                 } else {
                     ("09:00".to_string(), "10:00".to_string())
                 };
+                let date_str = date.format("%Y-%m-%d").to_string();
                 self.form = Some(crate::app::EventForm {
                     mode: FormMode::Create,
                     title: String::new(),
-                    date: date.format("%Y-%m-%d").to_string(),
+                    date: date_str.clone(),
+                    end_date: date_str,
                     start_time: start,
                     end_time: end,
                     color_id: String::new(),
@@ -249,12 +286,37 @@ impl App {
                     .end
                     .unwrap_or(event.start + chrono::Duration::hours(1))
                     .with_timezone(&chrono::Local);
+
+                let (date_s, end_date_s, time_s, time_e) = if event.all_day {
+                    let sd = start_local.date_naive();
+                    let ed = end_local.date_naive();
+                    let effective_end = if ed > sd {
+                        ed.pred_opt().unwrap_or(ed)
+                    } else {
+                        ed
+                    };
+                    (
+                        sd.format("%Y-%m-%d").to_string(),
+                        effective_end.format("%Y-%m-%d").to_string(),
+                        "00:00".to_string(),
+                        "23:59".to_string(),
+                    )
+                } else {
+                    (
+                        start_local.format("%Y-%m-%d").to_string(),
+                        end_local.format("%Y-%m-%d").to_string(),
+                        start_local.format("%H:%M").to_string(),
+                        end_local.format("%H:%M").to_string(),
+                    )
+                };
+
                 self.form = Some(crate::app::EventForm {
                     mode: FormMode::Edit(event.id.clone()),
                     title: event.summary.clone(),
-                    date: start_local.format("%Y-%m-%d").to_string(),
-                    start_time: start_local.format("%H:%M").to_string(),
-                    end_time: end_local.format("%H:%M").to_string(),
+                    date: date_s,
+                    end_date: end_date_s,
+                    start_time: time_s,
+                    end_time: time_e,
                     color_id: event.color_id.clone().unwrap_or_default(),
                     confirm_delete: false,
                 });
@@ -278,7 +340,16 @@ impl App {
             }
             Message::FormDateChanged(s) => {
                 if let Some(f) = &mut self.form {
-                    f.date = s;
+                    f.date = s.clone();
+                    if f.end_date.is_empty() || f.end_date < s {
+                        f.end_date = s;
+                    }
+                }
+                Command::none()
+            }
+            Message::FormEndDateChanged(s) => {
+                if let Some(f) = &mut self.form {
+                    f.end_date = s;
                 }
                 Command::none()
             }
@@ -427,6 +498,97 @@ impl App {
                     iced::window::close(iced::window::Id::MAIN)
                 }
             },
+            Message::SetupClientIdChanged(s) => {
+                self.setup_form.client_id = s;
+                Command::none()
+            }
+            Message::SetupClientSecretChanged(s) => {
+                self.setup_form.client_secret = s;
+                Command::none()
+            }
+            Message::SetupCalendarIdChanged(s) => {
+                self.setup_form.calendar_id = s;
+                Command::none()
+            }
+            Message::SetupSubmit => {
+                let client_id = self.setup_form.client_id.trim().to_string();
+                let client_secret = self.setup_form.client_secret.trim().to_string();
+                let calendar_id = if self.setup_form.calendar_id.trim().is_empty() {
+                    "primary".to_string()
+                } else {
+                    self.setup_form.calendar_id.trim().to_string()
+                };
+
+                if client_id.is_empty() || client_secret.is_empty() {
+                    self.setup_form.error =
+                        Some("Client ID e Client Secret sono obbligatori.".to_string());
+                    return Command::none();
+                }
+
+                let cfg = crate::config::AppConfig {
+                    client_id,
+                    client_secret,
+                    calendar_id,
+                };
+
+                match cfg.save() {
+                    Ok(()) => {
+                        self.config = cfg;
+                        self.state = AppState::WaitingAuth;
+                        self.state_before_setup = None;
+                        self.setup_form.error = None;
+
+                        crate::auth::oauth::delete_refresh_token();
+
+                        let client_id = self.config.client_id.clone();
+                        let client_secret = self.config.client_secret.clone();
+
+                        let auth_cmd = Command::perform(
+                            async move {
+                                crate::auth::oauth::run_full_auth_flow(
+                                    &client_id,
+                                    &client_secret,
+                                )
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            Message::TokenPolled,
+                        );
+
+                        let platform_cmd = Command::perform(
+                            async {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            },
+                            |_| Message::ApplyWindowEffects,
+                        );
+
+                        return Command::batch(vec![auth_cmd, platform_cmd]);
+                    }
+                    Err(e) => {
+                        self.setup_form.error =
+                            Some(format!("Errore nel salvataggio: {}", e));
+                        Command::none()
+                    }
+                }
+            }
+            Message::SetupReconfigure => {
+                self.setup_form = crate::app::SetupForm {
+                    client_id: self.config.client_id.clone(),
+                    client_secret: self.config.client_secret.clone(),
+                    calendar_id: self.config.calendar_id.clone(),
+                    error: None,
+                };
+                let prev = std::mem::replace(&mut self.state, AppState::Setup);
+                self.state_before_setup = Some(prev);
+                Command::none()
+            }
+            Message::SetupCancel => {
+                if let Some(prev) = self.state_before_setup.take() {
+                    self.state = prev;
+                    self.setup_form.error = None;
+                }
+                Command::none()
+            }
         }
     }
 

@@ -60,7 +60,7 @@ pub fn view_top_bar<'a>(
         .padding([2, 8])
         .into();
     let opacity_lbl: Element<Message> = container(
-        text(format!("{:.0}%", app.bg_alpha * 100.0))
+        text(format!("{:.0}%", app.window_alpha * 100.0))
             .size(12)
             .style(theme.text),
     )
@@ -79,6 +79,11 @@ pub fn view_top_bar<'a>(
 
     let theme_btn: Element<Message> = button(text(theme_label).size(11))
         .on_press(Message::ToggleTheme)
+        .padding([4, 8])
+        .into();
+
+    let settings_btn: Element<Message> = button(text("Set").size(11))
+        .on_press(Message::SetupReconfigure)
         .padding([4, 8])
         .into();
 
@@ -114,6 +119,7 @@ pub fn view_top_bar<'a>(
             autostart_btn,
             theme_btn,
             drag_area,
+            settings_btn,
             close_btn,
         ])
         .spacing(6)
@@ -145,6 +151,7 @@ pub fn view_top_bar<'a>(
         title,
         drag_area,
         theme_btn,
+        settings_btn,
         menu_btn,
         close_btn,
     ])
