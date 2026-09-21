@@ -1,3 +1,4 @@
+// ui/mod.rs
 mod form;
 mod handle;
 mod setup;
@@ -108,15 +109,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
         AppState::Setup => unreachable!(),
         AppState::WaitingAuth => {
             let t = theme.text;
-            container(
-                column(vec![
-                    text("Google Calendar Authorization").size(20).style(t).into(),
-                    text("The browser has been opened for authorization.").style(t).into(),
-                    text("Complete login and grant access.").style(t).into(),
-                    text("Waiting for confirmation...").style(t).into(),
-                ])
-                .spacing(12),
-            )
+            let retry_btn: Element<Message> = button(text("Retry").size(13))
+                .on_press(Message::RetryAuth)
+                .padding([6, 14])
+                .into();
+            let cancel_btn: Element<Message> = button(text("Cancel").size(13))
+                .on_press(Message::CancelAuth)
+                .padding([6, 14])
+                .into();
+            let buttons: Element<Message> =
+                row(vec![retry_btn, cancel_btn]).spacing(8).into();
+            column(vec![
+                text("Google Calendar Authorization").size(20).style(t).into(),
+                text("The browser has been opened for authorization.").style(t).into(),
+                text("Complete login and grant access.").style(t).into(),
+                text("Waiting for confirmation...").style(t).into(),
+                container(buttons).padding([12, 0]).into(),
+            ])
+            .spacing(12)
             .padding(20)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -167,15 +177,30 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .size(16)
                 .style(theme.text)
                 .into();
-            let retry_btn: Element<Message> = iced::widget::button("Retry authentication")
-                .on_press(Message::Reauthenticate)
+            let hint: Element<Message> = text(
+                "If the problem is a missing internet connection, click Retry once it is back. \
+                 Use \"Re-authenticate\" only if you want to sign in with a different account.",
+            )
+            .size(12)
+            .style(theme.text_muted)
+            .into();
+            let retry_btn: Element<Message> = button(text("Retry").size(13))
+                .on_press(Message::RetryAuth)
+                .padding([6, 14])
                 .into();
-            let settings_btn: Element<Message> = iced::widget::button("Configure credentials")
+            let reauth_btn: Element<Message> = button(text("Re-authenticate").size(13))
+                .on_press(Message::Reauthenticate)
+                .padding([6, 14])
+                .into();
+            let settings_btn: Element<Message> = button(text("Configure credentials").size(13))
                 .on_press(Message::SetupReconfigure)
+                .padding([6, 14])
                 .into();
             let buttons: Element<Message> =
-                row(vec![retry_btn, settings_btn]).spacing(8).into();
-            column(vec![msg, buttons])
+                row(vec![retry_btn, reauth_btn, settings_btn])
+                    .spacing(8)
+                    .into();
+            column(vec![msg, hint, buttons])
                 .spacing(12)
                 .padding(20)
                 .width(Length::Fill)

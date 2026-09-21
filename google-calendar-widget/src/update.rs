@@ -16,19 +16,25 @@ impl App {
             iced::window::Id::MAIN,
             iced::window::Mode::Windowed,
         );
-        let deferred = Command::perform(
+        let effects1 = Command::perform(
             async {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             },
             |_| Message::ApplyWindowEffectsDeferred,
         );
-        let delete_tab = Command::perform(
+        let effects2 = Command::perform(
             async {
-                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
             },
-            |_| Message::DeleteTaskbarTab,
+            |_| Message::ApplyWindowEffectsDeferred,
         );
-        Command::batch(vec![show, deferred, delete_tab])
+        let effects3 = Command::perform(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            },
+            |_| Message::ApplyWindowEffectsDeferred,
+        );
+        Command::batch(vec![show, effects1, effects2, effects3])
     }
 
     pub fn update(&mut self, message: Message) -> Command<Message> {
@@ -177,9 +183,15 @@ impl App {
                         ),
                         Command::perform(
                             async {
-                                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
                             },
-                            |_| Message::DeleteTaskbarTab,
+                            |_| Message::ApplyWindowEffectsDeferred,
+                        ),
+                        Command::perform(
+                            async {
+                                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                            },
+                            |_| Message::ApplyWindowEffectsDeferred,
                         ),
                     ])
                 }
@@ -191,12 +203,6 @@ impl App {
                     crate::platform::windows::remove_minimize_box(hwnd);
                     crate::platform::windows::set_bottom(hwnd);
                     crate::platform::windows::set_window_alpha(hwnd, self.window_alpha);
-                }
-                Command::none()
-            }
-            Message::DeleteTaskbarTab => {
-                #[cfg(target_os = "windows")]
-                if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
                     crate::platform::windows::delete_taskbar_tab(hwnd);
                 }
                 Command::none()
@@ -477,6 +483,8 @@ impl App {
             }
             Message::Reauthenticate => {
                 crate::auth::oauth::delete_refresh_token();
+                self.access_token = None;
+                self.expires_at = 0;
                 let client_id = self.config.client_id.clone();
                 let client_secret = self.config.client_secret.clone();
                 self.state = AppState::WaitingAuth;
@@ -489,6 +497,69 @@ impl App {
                     },
                     Message::TokenPolled,
                 )
+            }
+            Message::RetryAuth => {
+                let client_id = self.config.client_id.clone();
+                let client_secret = self.config.client_secret.clone();
+                match crate::auth::oauth::load_refresh_token() {
+                    Some(rt) => {
+                        self.state = AppState::Loading;
+                        Command::perform(
+                            async move {
+                                crate::auth::oauth::refresh_access_token(
+                                    &client_id,
+                                    &client_secret,
+                                    &rt,
+                                )
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            Message::TokenPolled,
+                        )
+                    }
+                    None => {
+                        self.state = AppState::WaitingAuth;
+                        Command::perform(
+                            async move {
+                                crate::auth::oauth::run_full_auth_flow(
+                                    &client_id,
+                                    &client_secret,
+                                )
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            Message::TokenPolled,
+                        )
+                    }
+                }
+            }
+            Message::AutoRetryTick => {
+                if !matches!(self.state, AppState::Error(_)) {
+                    return Command::none();
+                }
+                let client_id = self.config.client_id.clone();
+                let client_secret = self.config.client_secret.clone();
+                match crate::auth::oauth::load_refresh_token() {
+                    Some(rt) => Command::perform(
+                        async move {
+                            crate::auth::oauth::refresh_access_token(
+                                &client_id,
+                                &client_secret,
+                                &rt,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
+                        },
+                        Message::TokenPolled,
+                    ),
+                    None => Command::none(),
+                }
+            }
+            Message::CancelAuth => {
+                self.state = AppState::Error(
+                    "Authorization cancelled. Click Retry when you are ready.".to_string(),
+                );
+                Command::none()
             }
             Message::PollTray => {
                 if TrayIconEvent::receiver().try_recv().is_ok() {

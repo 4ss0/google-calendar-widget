@@ -18,7 +18,7 @@ mod update;
 mod view;
 
 use crate::api::colors::ColorPalette;
-use crate::app::App;
+use crate::app::{App, AppState};
 use crate::messages::Message;
 use crate::ui::AppTheme;
 use config::{AppConfig, WindowState};
@@ -101,12 +101,26 @@ impl Application for App {
         let loaded_config = AppConfig::load();
         crate::log::write(&format!("config loaded: {}", loaded_config.is_some()));
 
+        let existing_refresh = if loaded_config.is_some() {
+            let rt = auth::oauth::load_refresh_token();
+            crate::log::write(&format!(
+                "existing refresh token: {}",
+                rt.is_some()
+            ));
+            rt
+        } else {
+            None
+        };
+
         let (config, initial_state, setup_form) = match loaded_config {
-            Some(cfg) => (
-                cfg,
-                app::AppState::WaitingAuth,
-                app::SetupForm::default(),
-            ),
+            Some(cfg) => {
+                let state = if existing_refresh.is_some() {
+                    app::AppState::Loading
+                } else {
+                    app::AppState::WaitingAuth
+                };
+                (cfg, state, app::SetupForm::default())
+            }
             None => (
                 AppConfig {
                     client_id: String::new(),
@@ -145,11 +159,6 @@ impl Application for App {
         } else {
             let client_id = config.client_id.clone();
             let client_secret = config.client_secret.clone();
-            let existing_refresh = auth::oauth::load_refresh_token();
-            crate::log::write(&format!(
-                "existing refresh token: {}",
-                existing_refresh.is_some()
-            ));
 
             let auth_cmd = if let Some(rt) = existing_refresh {
                 Command::perform(
@@ -232,6 +241,13 @@ impl Application for App {
         let tray_tick = iced::time::every(std::time::Duration::from_millis(100))
             .map(|_| Message::PollTray);
 
+        let auto_retry = if matches!(self.state, AppState::Error(_)) {
+            iced::time::every(std::time::Duration::from_secs(10))
+                .map(|_| Message::AutoRetryTick)
+        } else {
+            Subscription::none()
+        };
+
         let keyboard = iced::keyboard::on_key_press(|key, _modifiers| match key {
             iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => {
                 Some(Message::CloseForm)
@@ -239,7 +255,7 @@ impl Application for App {
             _ => None,
         });
 
-        Subscription::batch(vec![events, bottom_tick, tray_tick, keyboard])
+        Subscription::batch(vec![events, bottom_tick, tray_tick, auto_retry, keyboard])
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
