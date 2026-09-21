@@ -60,6 +60,7 @@ pub struct CalendarEvent {
     pub all_day: bool,
     pub recurring_event_id: Option<String>,
     pub original_start_time: Option<DateTime<Utc>>,
+    pub recurrence: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +126,7 @@ fn convert(e: GoogleEvent) -> Option<CalendarEvent> {
         all_day,
         recurring_event_id: e.recurring_event_id,
         original_start_time,
+        recurrence: e.recurrence,
     })
 }
 

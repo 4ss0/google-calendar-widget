@@ -14,12 +14,12 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, CallWindowProcW, FindWindowW, GetClassNameW, GetForegroundWindow, 
-    GetWindowLongW, IsIconic, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow,
+    CallWindowProcW, FindWindowW, GetClassNameW, GetForegroundWindow,
+    GetWindowLongW, IsIconic, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowLongW,
+    SetWindowPos, ShowWindow,
     GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
     LWA_ALPHA, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, WNDPROC,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WNDPROC,
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
 };
 
@@ -81,6 +81,14 @@ pub fn is_desktop_foreground() -> bool {
         }
         let class = String::from_utf16_lossy(&class_buf[..len as usize]);
         class == "WorkerW" || class == "Progman"
+    }
+}
+
+pub fn is_window_foreground(hwnd_raw: isize) -> bool {
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let fg = GetForegroundWindow();
+        fg == hwnd
     }
 }
 
@@ -159,8 +167,11 @@ pub fn force_show_on_desktop(hwnd_raw: isize) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
 
-        let _ = ShowWindow(hwnd, SW_HIDE);
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+
+        uncloak_if_needed(hwnd_raw);
 
         let _ = SetWindowPos(
             hwnd,
@@ -169,7 +180,7 @@ pub fn force_show_on_desktop(hwnd_raw: isize) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
         );
 
         let _ = SetWindowPos(
@@ -179,11 +190,9 @@ pub fn force_show_on_desktop(hwnd_raw: isize) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
 
-        let _ = BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
         let _ = DwmFlush();
     }
 }
@@ -198,28 +207,24 @@ pub fn ensure_visible_bottom(hwnd_raw: isize) {
 
         uncloak_if_needed(hwnd_raw);
 
-        if is_desktop_foreground() {
-            force_show_on_desktop(hwnd_raw);
-        } else {
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_NOTOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_BOTTOM,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-        }
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 

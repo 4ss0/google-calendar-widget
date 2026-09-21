@@ -352,10 +352,13 @@ impl App {
             .unwrap_or(pending.event.start + Duration::hours(1));
         let color_id = pending.event.color_id.clone();
         let all_day = pending.event.all_day;
+        let recurrence = pending.event.recurrence.clone();
 
         crate::log::write(&format!(
-            "undo: recreating deleted event summary={:?} start={}",
-            summary, start
+            "undo: recreating deleted event summary={:?} start={} recurring={}",
+            summary,
+            start,
+            recurrence.is_some()
         ));
 
         Some(Command::perform(
@@ -374,7 +377,7 @@ impl App {
                         end,
                         color_id.as_deref(),
                         all_day,
-                        None,
+                        recurrence,
                     )
                     .await
                     .map(|_| ())

@@ -274,6 +274,7 @@ mod tests {
             all_day,
             recurring_event_id: None,
             original_start_time: None,
+            recurrence: None,
         }
     }
 
@@ -388,6 +389,7 @@ mod tests {
                 all_day: false,
                 recurring_event_id: None,
                 original_start_time: None,
+                recurrence: None,
             }
         };
         let idx = EventIndex::new(vec![

@@ -255,6 +255,10 @@ impl App {
             Message::KeepAtBottom => {
                 #[cfg(target_os = "windows")]
                 if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
+                    if crate::platform::windows::is_window_foreground(hwnd) {
+                        return Command::none();
+                    }
+
                     let is_desktop = crate::platform::windows::is_desktop_foreground();
                     let was = self.last_desktop_foreground;
                     self.last_desktop_foreground = is_desktop;
