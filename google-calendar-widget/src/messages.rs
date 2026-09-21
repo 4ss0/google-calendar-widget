@@ -1,4 +1,4 @@
-use crate::app::ApiResult;
+use crate::app::{ApiResult, EditScope, RecurFreq};
 use crate::api::client::CalendarEvent;
 use crate::config::StoredToken;
 use crate::tray::TrayMessage;
@@ -29,6 +29,14 @@ pub enum Message {
     FormStartChanged(String),
     FormEndChanged(String),
     FormColorChanged(String),
+    FormAllDayToggled(bool),
+    FormRecurringToggled(bool),
+    FormRecurFreqChanged(RecurFreq),
+    FormRecurIntervalChanged(String),
+    FormRecurUntilChanged(String),
+    FormEditScopeChanged(EditScope),
+    ConfirmEmptyTitle,
+    CancelEmptyTitle,
     SaveEvent,
     RequestDeleteEvent,
     CancelDeleteEvent,

@@ -1,8 +1,8 @@
-use crate::app::{App, AppState, EventIndex, FormMode};
+use crate::app::{App, AppState, EditScope, EventIndex, FormMode, RecurFreq};
 use crate::messages::Message;
 use crate::persistence;
 use crate::tray;
-use crate::ui::{self, AppTheme};
+use crate::ui::AppTheme;
 use chrono::Duration;
 use iced::{Command, Size};
 use tray_icon::menu::MenuEvent;
@@ -10,31 +10,47 @@ use tray_icon::TrayIconEvent;
 
 const MIN_WINDOW_ALPHA: f32 = 0.55;
 
+fn schedule_win_effects() -> Command<Message> {
+    Command::batch(vec![
+        Command::perform(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            },
+            |_| Message::ApplyWindowEffectsDeferred,
+        ),
+        Command::perform(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            },
+            |_| Message::ApplyWindowEffectsDeferred,
+        ),
+        Command::perform(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            },
+            |_| Message::ApplyWindowEffectsDeferred,
+        ),
+    ])
+}
+
+#[cfg(target_os = "windows")]
+fn apply_win_effects(alpha: f32) {
+    if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
+        crate::platform::windows::hide_from_taskbar(hwnd);
+        crate::platform::windows::remove_minimize_box(hwnd);
+        crate::platform::windows::set_bottom(hwnd);
+        crate::platform::windows::set_window_alpha(hwnd, alpha);
+        crate::platform::windows::delete_taskbar_tab(hwnd);
+    }
+}
+
 impl App {
     pub fn show_window_with_effects() -> Command<Message> {
         let show = iced::window::change_mode(
             iced::window::Id::MAIN,
             iced::window::Mode::Windowed,
         );
-        let effects1 = Command::perform(
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            },
-            |_| Message::ApplyWindowEffectsDeferred,
-        );
-        let effects2 = Command::perform(
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-            },
-            |_| Message::ApplyWindowEffectsDeferred,
-        );
-        let effects3 = Command::perform(
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            },
-            |_| Message::ApplyWindowEffectsDeferred,
-        );
-        Command::batch(vec![show, effects1, effects2, effects3])
+        Command::batch(vec![show, schedule_win_effects()])
     }
 
     pub fn update(&mut self, message: Message) -> Command<Message> {
@@ -174,37 +190,12 @@ impl App {
                     self.started_minimized = true;
                     Self::show_window_with_effects()
                 } else {
-                    Command::batch(vec![
-                        Command::perform(
-                            async {
-                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                            },
-                            |_| Message::ApplyWindowEffectsDeferred,
-                        ),
-                        Command::perform(
-                            async {
-                                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-                            },
-                            |_| Message::ApplyWindowEffectsDeferred,
-                        ),
-                        Command::perform(
-                            async {
-                                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                            },
-                            |_| Message::ApplyWindowEffectsDeferred,
-                        ),
-                    ])
+                    schedule_win_effects()
                 }
             }
             Message::ApplyWindowEffectsDeferred => {
                 #[cfg(target_os = "windows")]
-                if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
-                    crate::platform::windows::hide_from_taskbar(hwnd);
-                    crate::platform::windows::remove_minimize_box(hwnd);
-                    crate::platform::windows::set_bottom(hwnd);
-                    crate::platform::windows::set_window_alpha(hwnd, self.window_alpha);
-                    crate::platform::windows::delete_taskbar_tab(hwnd);
-                }
+                apply_win_effects(self.window_alpha);
                 Command::none()
             }
             Message::KeepAtBottom => {
@@ -217,7 +208,9 @@ impl App {
             Message::TokenPolled(Ok(token)) => {
                 if let Some(rt) = &token.refresh_token {
                     let _ = crate::auth::oauth::save_refresh_token(rt);
+                    self.refresh_token = Some(rt.clone());
                 }
+                self.auth_retry_in_flight = false;
                 self.access_token = Some(token.access_token.clone());
                 self.expires_at = token.expires_at;
                 self.state = AppState::Loading;
@@ -225,6 +218,7 @@ impl App {
                 self.fetch_command_now(calendar_id, token.access_token, token.expires_at)
             }
             Message::TokenPolled(Err(e)) => {
+                self.auth_retry_in_flight = false;
                 self.state = AppState::Error(format!("Authentication error: {}", e));
                 self.reveal_window()
             }
@@ -245,20 +239,20 @@ impl App {
                 }
             }
             Message::Prev => {
-                let layout = ui::Layout::from_width(self.window_size.width);
+                let layout = self.layout();
                 self.selected = match layout {
-                    ui::Layout::Month => crate::date_utils::shift_month(self.selected, -1),
-                    ui::Layout::Week => self.selected - Duration::days(7),
-                    ui::Layout::Day => self.selected - Duration::days(1),
+                    crate::ui::Layout::Month => crate::date_utils::shift_month(self.selected, -1),
+                    crate::ui::Layout::Week => self.selected - Duration::days(7),
+                    crate::ui::Layout::Day => self.selected - Duration::days(1),
                 };
                 self.refetch()
             }
             Message::Next => {
-                let layout = ui::Layout::from_width(self.window_size.width);
+                let layout = self.layout();
                 self.selected = match layout {
-                    ui::Layout::Month => crate::date_utils::shift_month(self.selected, 1),
-                    ui::Layout::Week => self.selected + Duration::days(7),
-                    ui::Layout::Day => self.selected + Duration::days(1),
+                    crate::ui::Layout::Month => crate::date_utils::shift_month(self.selected, 1),
+                    crate::ui::Layout::Week => self.selected + Duration::days(7),
+                    crate::ui::Layout::Day => self.selected + Duration::days(1),
                 };
                 self.refetch()
             }
@@ -279,7 +273,16 @@ impl App {
                     start_time: start,
                     end_time: end,
                     color_id: String::new(),
+                    all_day: false,
+                    recurring: false,
+                    recur_freq: RecurFreq::Weekly,
+                    recur_interval: "1".to_string(),
+                    recur_until: String::new(),
+                    recurring_event_id: None,
+                    original_start: None,
+                    edit_scope: EditScope::OnlyThis,
                     confirm_delete: false,
+                    confirm_empty_title: false,
                 });
                 self.saving = false;
                 self.last_error = None;
@@ -305,13 +308,26 @@ impl App {
                     start_time: start,
                     end_time: end,
                     color_id: String::new(),
+                    all_day: false,
+                    recurring: false,
+                    recur_freq: RecurFreq::Weekly,
+                    recur_interval: "1".to_string(),
+                    recur_until: String::new(),
+                    recurring_event_id: None,
+                    original_start: None,
+                    edit_scope: EditScope::OnlyThis,
                     confirm_delete: false,
+                    confirm_empty_title: false,
                 });
                 self.saving = false;
                 self.last_error = None;
                 Command::none()
             }
             Message::OpenEditForm(event) => {
+                crate::log::write(&format!(
+                    "open edit: id={} recurring_event_id={:?} original_start={:?}",
+                    event.id, event.recurring_event_id, event.original_start_time
+                ));
                 let start_local = event.start.with_timezone(&chrono::Local);
                 let end_local = event
                     .end
@@ -349,7 +365,16 @@ impl App {
                     start_time: time_s,
                     end_time: time_e,
                     color_id: event.color_id.clone().unwrap_or_default(),
+                    all_day: event.all_day,
+                    recurring: false,
+                    recur_freq: RecurFreq::Weekly,
+                    recur_interval: "1".to_string(),
+                    recur_until: String::new(),
+                    recurring_event_id: event.recurring_event_id.clone(),
+                    original_start: event.original_start_time,
+                    edit_scope: EditScope::OnlyThis,
                     confirm_delete: false,
+                    confirm_empty_title: false,
                 });
                 self.saving = false;
                 self.last_error = None;
@@ -366,6 +391,7 @@ impl App {
             Message::FormTitleChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.title = s;
+                    f.confirm_empty_title = false;
                 }
                 Command::none()
             }
@@ -402,8 +428,67 @@ impl App {
                 }
                 Command::none()
             }
+            Message::FormAllDayToggled(b) => {
+                if let Some(f) = &mut self.form {
+                    f.all_day = b;
+                }
+                Command::none()
+            }
+            Message::FormRecurringToggled(b) => {
+                if let Some(f) = &mut self.form {
+                    f.recurring = b;
+                }
+                Command::none()
+            }
+            Message::FormRecurFreqChanged(freq) => {
+                if let Some(f) = &mut self.form {
+                    f.recur_freq = freq;
+                }
+                Command::none()
+            }
+            Message::FormRecurIntervalChanged(s) => {
+                if let Some(f) = &mut self.form {
+                    f.recur_interval = s;
+                }
+                Command::none()
+            }
+            Message::FormRecurUntilChanged(s) => {
+                if let Some(f) = &mut self.form {
+                    f.recur_until = s;
+                }
+                Command::none()
+            }
+            Message::FormEditScopeChanged(scope) => {
+                if let Some(f) = &mut self.form {
+                    f.edit_scope = scope;
+                }
+                Command::none()
+            }
+            Message::ConfirmEmptyTitle => {
+                if let Some(f) = &mut self.form {
+                    f.confirm_empty_title = true;
+                }
+                self.update(Message::SaveEvent)
+            }
+            Message::CancelEmptyTitle => {
+                if let Some(f) = &mut self.form {
+                    f.confirm_empty_title = false;
+                }
+                Command::none()
+            }
             Message::SaveEvent => {
                 if self.saving {
+                    return Command::none();
+                }
+                let needs_confirm = self
+                    .form
+                    .as_ref()
+                    .map(|f| f.title.trim().is_empty() && !f.confirm_empty_title)
+                    .unwrap_or(false);
+                if needs_confirm {
+                    if let Some(f) = &mut self.form {
+                        f.confirm_empty_title = true;
+                    }
                     return Command::none();
                 }
                 match self.handle_save() {
@@ -484,7 +569,9 @@ impl App {
             Message::Reauthenticate => {
                 crate::auth::oauth::delete_refresh_token();
                 self.access_token = None;
+                self.refresh_token = None;
                 self.expires_at = 0;
+                self.auth_retry_in_flight = false;
                 let client_id = self.config.client_id.clone();
                 let client_secret = self.config.client_secret.clone();
                 self.state = AppState::WaitingAuth;
@@ -501,7 +588,7 @@ impl App {
             Message::RetryAuth => {
                 let client_id = self.config.client_id.clone();
                 let client_secret = self.config.client_secret.clone();
-                match crate::auth::oauth::load_refresh_token() {
+                match self.refresh_token.clone() {
                     Some(rt) => {
                         self.state = AppState::Loading;
                         Command::perform(
@@ -537,21 +624,27 @@ impl App {
                 if !matches!(self.state, AppState::Error(_)) {
                     return Command::none();
                 }
+                if self.auth_retry_in_flight {
+                    return Command::none();
+                }
                 let client_id = self.config.client_id.clone();
                 let client_secret = self.config.client_secret.clone();
-                match crate::auth::oauth::load_refresh_token() {
-                    Some(rt) => Command::perform(
-                        async move {
-                            crate::auth::oauth::refresh_access_token(
-                                &client_id,
-                                &client_secret,
-                                &rt,
-                            )
-                            .await
-                            .map_err(|e| e.to_string())
-                        },
-                        Message::TokenPolled,
-                    ),
+                match self.refresh_token.clone() {
+                    Some(rt) => {
+                        self.auth_retry_in_flight = true;
+                        Command::perform(
+                            async move {
+                                crate::auth::oauth::refresh_access_token(
+                                    &client_id,
+                                    &client_secret,
+                                    &rt,
+                                )
+                                .await
+                                .map_err(|e| e.to_string())
+                            },
+                            Message::TokenPolled,
+                        )
+                    }
                     None => Command::none(),
                 }
             }
@@ -627,6 +720,7 @@ impl App {
                         self.state = AppState::WaitingAuth;
                         self.state_before_setup = None;
                         self.setup_form.error = None;
+                        self.refresh_token = None;
 
                         crate::auth::oauth::delete_refresh_token();
 

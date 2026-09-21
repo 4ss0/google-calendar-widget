@@ -26,7 +26,6 @@ use iced::window::Position;
 use iced::{Application, Command, Element, Point, Size, Subscription, Theme};
 
 fn main() -> iced::Result {
-    let started_minimized = std::env::args().any(|a| a == "--minimized");
     dotenvy::dotenv().ok();
 
     crate::log::line();
@@ -49,8 +48,6 @@ fn main() -> iced::Result {
         ),
         None => (Size::new(1150.0, 850.0), Position::Default),
     };
-
-    let _ = started_minimized;
 
     App::run(iced::Settings {
         window: iced::window::Settings {
@@ -90,8 +87,15 @@ impl Application for App {
                 Point::new(w.x, w.y),
                 w.dark_mode,
             ),
-            None => (Size::new(1150.0, 850.0), Point::new(0.0, 0.0), false),
+            None => {
+                #[cfg(target_os = "windows")]
+                let d = crate::platform::windows::system_is_dark();
+                #[cfg(not(target_os = "windows"))]
+                let d = false;
+                (Size::new(1150.0, 850.0), Point::new(0.0, 0.0), d)
+            }
         };
+
         let initial_theme = if dark_mode {
             AppTheme::dark()
         } else {
@@ -160,7 +164,7 @@ impl Application for App {
             let client_id = config.client_id.clone();
             let client_secret = config.client_secret.clone();
 
-            let auth_cmd = if let Some(rt) = existing_refresh {
+            let auth_cmd = if let Some(rt) = existing_refresh.clone() {
                 Command::perform(
                     async move {
                         auth::oauth::refresh_access_token(&client_id, &client_secret, &rt)
@@ -203,7 +207,9 @@ impl Application for App {
                 started_minimized,
                 menu_open: false,
                 access_token: None,
+                refresh_token: existing_refresh,
                 expires_at: 0,
+                auth_retry_in_flight: false,
                 last_focus_fetch: None,
                 form: None,
                 saving: false,

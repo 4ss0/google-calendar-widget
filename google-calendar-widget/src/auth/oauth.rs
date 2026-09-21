@@ -9,6 +9,8 @@ use tokio::net::TcpListener;
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+const AUTH_TIMEOUT_SECS: u64 = 300;
+const CALLBACK_PATH: &str = "/oauth/callback";
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
@@ -46,7 +48,7 @@ pub async fn run_full_auth_flow(
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let redirect_uri = format!("http://127.0.0.1:{}/oauth/callback", port);
+    let redirect_uri = format!("http://127.0.0.1:{}{}", port, CALLBACK_PATH);
     crate::log::write(&format!("auth: redirect_uri = {}", redirect_uri));
 
     let (verifier, challenge) = generate_pkce();
@@ -60,42 +62,79 @@ pub async fn run_full_auth_flow(
         urlencoding::encode(&challenge),
     );
 
-    open::that(&auth_url)?;
-
-    let (mut stream, _) = listener.accept().await?;
-    let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await?;
-    let request = String::from_utf8_lossy(&buf[..n]);
-
-    let first_line = request.lines().next().unwrap_or("");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("");
-    let query = path.split('?').nth(1).unwrap_or("");
-    let mut code: Option<String> = None;
-    let mut error: Option<String> = None;
-    for pair in query.split('&') {
-        let mut kv = pair.splitn(2, '=');
-        let k = kv.next().unwrap_or("");
-        let v = kv.next().unwrap_or("");
-        let v = urlencoding::decode(v).unwrap_or_default().to_string();
-        if k == "code" {
-            code = Some(v);
-        } else if k == "error" {
-            error = Some(v);
-        }
+    if let Err(e) = open::that(&auth_url) {
+        crate::log::write(&format!("auth: failed to open browser: {}", e));
+        anyhow::bail!("Failed to open browser: {}", e);
     }
 
-    let body = if code.is_some() {
-        "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Authorization complete</h2><p>You can close this window and return to the widget.</p></body></html>"
-    } else {
-        "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Authorization error</h2><p>Check the widget for details.</p></body></html>"
-    };
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(AUTH_TIMEOUT_SECS);
+
+    let mut code: Option<String> = None;
+    let mut error: Option<String> = None;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            crate::log::write("auth: timeout waiting for callback");
+            anyhow::bail!("OAuth timeout: no callback received");
+        }
+
+        let (mut stream, _) = tokio::time::timeout(remaining, listener.accept())
+            .await
+            .map_err(|_| anyhow::anyhow!("OAuth timeout: no callback received"))??;
+
+        let mut buf = vec![0u8; 8192];
+        let n = match stream.read(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let request = String::from_utf8_lossy(&buf[..n]);
+        let first_line = request.lines().next().unwrap_or("");
+        let path = first_line.split_whitespace().nth(1).unwrap_or("");
+
+        if !path.starts_with(CALLBACK_PATH) {
+            let body = "<html><body></body></html>";
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+            continue;
+        }
+
+        let query = path.split('?').nth(1).unwrap_or("");
+        for pair in query.split('&') {
+            let mut kv = pair.splitn(2, '=');
+            let k = kv.next().unwrap_or("");
+            let v = kv.next().unwrap_or("");
+            let v = urlencoding::decode(v).unwrap_or_default().to_string();
+            if k == "code" {
+                code = Some(v);
+            } else if k == "error" {
+                error = Some(v);
+            }
+        }
+
+        let body = if code.is_some() {
+            "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Authorization complete</h2><p>You can close this window and return to the widget.</p></body></html>"
+        } else {
+            "<html><body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>Authorization error</h2><p>Check the widget for details.</p></body></html>"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+
+        if code.is_some() || error.is_some() {
+            break;
+        }
+    }
 
     if let Some(e) = error {
         crate::log::write(&format!("auth: error from google: {}", e));

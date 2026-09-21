@@ -1,4 +1,3 @@
-// ui/mod.rs
 mod form;
 mod handle;
 mod setup;
@@ -33,6 +32,27 @@ fn outer_style(
         },
         shadow: Default::default(),
     }
+}
+
+fn wrap_with_handle<'a>(
+    content: Element<'a, Message>,
+    theme: &'a ui::AppTheme,
+    alpha: f32,
+) -> Element<'a, Message> {
+    let inner: Element<Message> = container(content)
+        .padding(10)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(outer_style(theme, alpha))
+        .into();
+
+    let handle_el = handle::view_handle(theme);
+
+    column(vec![inner, handle_el])
+        .spacing(0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
@@ -85,24 +105,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .spacing(6)
             .width(Length::Fill)
             .height(Length::Fill);
-
-        let inner: Element<Message> = container(body)
-            .padding(10)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(outer_style(theme, alpha))
-            .into();
-
-        let handle_el = handle::view_handle(theme);
-
-        return column(vec![inner, handle_el])
-            .spacing(0)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+        return wrap_with_handle(body.into(), theme, alpha);
     }
 
-    let layout = ui::Layout::from_width(app.window_size.width);
+    let layout = app.layout();
     let top_bar = top_bar::view_top_bar(app, layout, theme);
 
     let content: Element<Message> = match &app.state {
@@ -214,18 +220,5 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill);
 
-    let inner: Element<Message> = container(body)
-        .padding(10)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(outer_style(theme, alpha))
-        .into();
-
-    let handle_el = handle::view_handle(theme);
-
-    column(vec![inner, handle_el])
-        .spacing(0)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    wrap_with_handle(body.into(), theme, alpha)
 }

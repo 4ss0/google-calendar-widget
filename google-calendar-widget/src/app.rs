@@ -1,8 +1,8 @@
 use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
 use crate::config::{AppConfig, StoredToken};
-use crate::ui::AppTheme;
-use chrono::NaiveDate;
+use crate::ui::{AppTheme, Layout};
+use chrono::{DateTime, NaiveDate, Utc};
 use iced::{Point, Size};
 use std::collections::HashMap;
 
@@ -10,6 +10,68 @@ use std::collections::HashMap;
 pub enum FormMode {
     Create,
     Edit(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecurFreq {
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+impl RecurFreq {
+    pub fn all() -> [RecurFreq; 4] {
+        [
+            RecurFreq::Daily,
+            RecurFreq::Weekly,
+            RecurFreq::Monthly,
+            RecurFreq::Yearly,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            RecurFreq::Daily => "Daily",
+            RecurFreq::Weekly => "Weekly",
+            RecurFreq::Monthly => "Monthly",
+            RecurFreq::Yearly => "Yearly",
+        }
+    }
+
+    pub fn rrule_name(&self) -> &'static str {
+        match self {
+            RecurFreq::Daily => "DAILY",
+            RecurFreq::Weekly => "WEEKLY",
+            RecurFreq::Monthly => "MONTHLY",
+            RecurFreq::Yearly => "YEARLY",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditScope {
+    OnlyThis,
+    All,
+    ThisAndFollowing,
+}
+
+impl EditScope {
+    pub fn all() -> [EditScope; 3] {
+        [
+            EditScope::OnlyThis,
+            EditScope::All,
+            EditScope::ThisAndFollowing,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            EditScope::OnlyThis => "Only this",
+            EditScope::All => "All events",
+            EditScope::ThisAndFollowing => "This and following",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -21,7 +83,16 @@ pub struct EventForm {
     pub start_time: String,
     pub end_time: String,
     pub color_id: String,
+    pub all_day: bool,
+    pub recurring: bool,
+    pub recur_freq: RecurFreq,
+    pub recur_interval: String,
+    pub recur_until: String,
+    pub recurring_event_id: Option<String>,
+    pub original_start: Option<DateTime<Utc>>,
+    pub edit_scope: EditScope,
     pub confirm_delete: bool,
+    pub confirm_empty_title: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,9 +187,111 @@ pub struct App {
     pub started_minimized: bool,
     pub menu_open: bool,
     pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
     pub expires_at: i64,
+    pub auth_retry_in_flight: bool,
     pub last_focus_fetch: Option<std::time::Instant>,
     pub form: Option<EventForm>,
     pub saving: bool,
     pub last_error: Option<String>,
+}
+
+impl App {
+    pub fn layout(&self) -> Layout {
+        Layout::from_width(self.window_size.width)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+
+    fn make(
+        id: &str,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        all_day: bool,
+    ) -> CalendarEvent {
+        CalendarEvent {
+            id: id.into(),
+            summary: id.into(),
+            start,
+            end: Some(end),
+            color_id: None,
+            all_day,
+            recurring_event_id: None,
+            original_start_time: None,
+        }
+    }
+
+    #[test]
+    fn timed_event_only_on_start_day() {
+        let start = chrono::Local
+            .with_ymd_and_hms(2026, 9, 21, 14, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let end = start + Duration::hours(2);
+        let idx = EventIndex::new(vec![make("a", start, end, false)]);
+        assert_eq!(idx.for_date(NaiveDate::from_ymd_opt(2026, 9, 21).unwrap()).len(), 1);
+        assert_eq!(idx.for_date(NaiveDate::from_ymd_opt(2026, 9, 22).unwrap()).len(), 0);
+    }
+
+    #[test]
+    fn all_day_event_spans_days() {
+        let s_local = chrono::Local
+            .with_ymd_and_hms(2026, 9, 21, 0, 0, 0)
+            .single()
+            .unwrap();
+        let e_local = chrono::Local
+            .with_ymd_and_hms(2026, 9, 24, 0, 0, 0)
+            .single()
+            .unwrap();
+        let idx = EventIndex::new(vec![make(
+            "a",
+            s_local.with_timezone(&chrono::Utc),
+            e_local.with_timezone(&chrono::Utc),
+            true,
+        )]);
+        for d in 21..=23 {
+            assert_eq!(
+                idx.for_date(NaiveDate::from_ymd_opt(2026, 9, d).unwrap()).len(),
+                1,
+                "expected event on 2026-09-{}",
+                d
+            );
+        }
+        assert_eq!(
+            idx.for_date(NaiveDate::from_ymd_opt(2026, 9, 24).unwrap()).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn late_night_timed_event_indexed_on_local_day() {
+        let start = chrono::Local
+            .with_ymd_and_hms(2026, 9, 21, 0, 30, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let end = start + Duration::hours(1);
+        let idx = EventIndex::new(vec![make("a", start, end, false)]);
+        assert_eq!(idx.for_date(NaiveDate::from_ymd_opt(2026, 9, 21).unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn rrule_name_maps_to_ical_tokens() {
+        assert_eq!(RecurFreq::Daily.rrule_name(), "DAILY");
+        assert_eq!(RecurFreq::Weekly.rrule_name(), "WEEKLY");
+        assert_eq!(RecurFreq::Monthly.rrule_name(), "MONTHLY");
+        assert_eq!(RecurFreq::Yearly.rrule_name(), "YEARLY");
+    }
+
+    #[test]
+    fn edit_scope_labels() {
+        assert_eq!(EditScope::OnlyThis.label(), "Only this");
+        assert_eq!(EditScope::All.label(), "All events");
+        assert_eq!(EditScope::ThisAndFollowing.label(), "This and following");
+    }
 }

@@ -1,9 +1,13 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::OnceLock;
 use windows::core::{IUnknown, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
 };
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -13,7 +17,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
 };
 
+static CACHED_HWND: OnceLock<isize> = OnceLock::new();
+
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
 pub fn find_hwnd(title: &str) -> Option<isize> {
+    if let Some(v) = CACHED_HWND.get() {
+        return Some(*v);
+    }
     let wide: Vec<u16> = OsStr::new(title)
         .encode_wide()
         .chain(std::iter::once(0))
@@ -24,7 +37,9 @@ pub fn find_hwnd(title: &str) -> Option<isize> {
                 if hwnd.0.is_null() {
                     None
                 } else {
-                    Some(hwnd.0 as isize)
+                    let raw = hwnd.0 as isize;
+                    let _ = CACHED_HWND.set(raw);
+                    Some(raw)
                 }
             }
             Err(_) => None,
@@ -115,5 +130,38 @@ pub fn delete_taskbar_tab(hwnd_raw: isize) {
             let hwnd = HWND(hwnd_raw as *mut _);
             let _ = taskbar.DeleteTab(hwnd);
         }
+    }
+}
+
+pub fn system_is_dark() -> bool {
+    let subkey = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    let value = to_wide("AppsUseLightTheme");
+    unsafe {
+        let mut hkey = HKEY::default();
+        let open = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        );
+        if open.0 != 0 {
+            return false;
+        }
+        let mut data: u32 = 1;
+        let mut size: u32 = 4;
+        let res = RegQueryValueExW(
+            hkey,
+            PCWSTR(value.as_ptr()),
+            None,
+            None,
+            Some(&mut data as *mut u32 as *mut u8),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if res.0 != 0 {
+            return false;
+        }
+        data == 0
     }
 }
