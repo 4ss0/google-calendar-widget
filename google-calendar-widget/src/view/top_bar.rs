@@ -2,7 +2,7 @@ use crate::app::App;
 use crate::messages::Message;
 use crate::ui::{self, AppTheme};
 use chrono::Duration;
-use iced::widget::{button, container, mouse_area, row, text};
+use iced::widget::{button, container, mouse_area, row, text, text_input};
 use iced::{Element, Length};
 
 pub fn view_top_bar<'a>(
@@ -92,6 +92,21 @@ pub fn view_top_bar<'a>(
         .padding([4, 10])
         .into();
 
+    let search_input: Element<Message> = text_input("Search…", &app.search_query)
+        .on_input(Message::SearchQueryChanged)
+        .width(Length::Fixed(150.0))
+        .padding([4, 6])
+        .into();
+
+    let search_clear_btn: Element<Message> = if app.search_query.is_empty() {
+        container(text("")).width(Length::Fixed(0.0)).into()
+    } else {
+        button(text("×").size(14))
+            .on_press(Message::SearchClear)
+            .padding([2, 8])
+            .into()
+    };
+
     let drag_area: Element<Message> = mouse_area(
         container(text(""))
             .width(Length::Fill)
@@ -113,6 +128,8 @@ pub fn view_top_bar<'a>(
             title,
             today_btn,
             new_btn,
+            search_input,
+            search_clear_btn,
             more_transp_btn,
             opacity_lbl,
             less_transp_btn,
@@ -163,6 +180,11 @@ pub fn view_top_bar<'a>(
         return bar_row;
     }
 
+    let menu_row0: Element<Message> = row(vec![search_input, search_clear_btn])
+        .spacing(6)
+        .padding([2, 2])
+        .into();
+
     let menu_row1: Element<Message> = row(vec![today_btn, new_btn, autostart_btn])
         .spacing(6)
         .padding([2, 2])
@@ -177,7 +199,7 @@ pub fn view_top_bar<'a>(
     .padding([2, 2])
     .into();
 
-    iced::widget::column(vec![bar_row, menu_row1, menu_row2])
+    iced::widget::column(vec![bar_row, menu_row0, menu_row1, menu_row2])
         .spacing(4)
         .into()
 }

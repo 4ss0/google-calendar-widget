@@ -16,16 +16,26 @@ pub fn build_view<'a>(
     theme: &'a AppTheme,
     width: f32,
     height: f32,
+    search_query: &str,
+    drag_source_id: Option<&'a str>,
+    drop_target: Option<NaiveDate>,
 ) -> Element<'a, crate::Message> {
     let today = chrono::Local::now().date_naive();
     let start = selected;
     let ef = event_font(width);
 
+    let q: Option<&str> = if search_query.trim().is_empty() {
+        None
+    } else {
+        Some(search_query)
+    };
+
     let mut cols: Vec<Element<'a, crate::Message>> = Vec::new();
     for i in 0..7 {
         let date = start + Duration::days(i);
-        let day_events = index.for_date(date);
+        let day_events = index.for_date_filtered(date, q);
         let is_today = date == today;
+        let is_drop_target = drop_target == Some(date);
         cols.push(render_day_column(
             date,
             &day_events,
@@ -34,6 +44,8 @@ pub fn build_view<'a>(
             is_today,
             ef,
             height,
+            drag_source_id,
+            is_drop_target,
         ));
     }
 
@@ -48,6 +60,8 @@ fn render_day_column<'a>(
     is_today: bool,
     ef: u16,
     height: f32,
+    drag_source_id: Option<&'a str>,
+    is_drop_target: bool,
 ) -> Element<'a, crate::Message> {
     let weekday_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         [date.weekday().num_days_from_monday() as usize];
@@ -89,7 +103,14 @@ fn render_day_column<'a>(
 
     let mut evs: Vec<Element<'a, crate::Message>> = Vec::new();
     for event in events.iter() {
-        evs.push(render_event_box(event, palette, EventBoxStyle::week(ef)));
+        let dragging = drag_source_id == Some(event.id.as_str());
+        evs.push(render_event_box(
+            event,
+            palette,
+            EventBoxStyle::week(ef),
+            date,
+            dragging,
+        ));
     }
 
     let ev_col: Element<'a, crate::Message> = column(evs).spacing(4).into();
@@ -114,8 +135,17 @@ fn render_day_column<'a>(
     };
 
     let inner_text = theme.text;
-    let inner_bg = theme.surface_alt;
-    let inner_border = theme.border_light;
+    let inner_bg = if is_drop_target {
+        Color::from_rgba(0.35, 0.55, 0.90, 0.20)
+    } else {
+        theme.surface_alt
+    };
+    let inner_border = if is_drop_target {
+        Color::from_rgba(0.35, 0.55, 0.90, 0.95)
+    } else {
+        theme.border_light
+    };
+    let inner_border_w = if is_drop_target { 2.0 } else { 1.0 };
 
     let inner: Element<'a, crate::Message> = container(column(vec![header, body]).spacing(4))
         .width(Length::FillPortion(1))
@@ -126,7 +156,7 @@ fn render_day_column<'a>(
             background: Some(Background::Color(inner_bg)),
             border: Border {
                 color: inner_border,
-                width: 1.0,
+                width: inner_border_w,
                 radius: 8.0.into(),
             },
             shadow: Default::default(),
@@ -135,5 +165,6 @@ fn render_day_column<'a>(
 
     mouse_area(inner)
         .on_press(crate::Message::OpenCreateFormForDate(date))
+        .on_move(move |_| crate::Message::CellHover(date))
         .into()
 }

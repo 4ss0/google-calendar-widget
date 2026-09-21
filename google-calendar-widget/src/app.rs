@@ -109,6 +109,20 @@ pub struct ApiResult<T> {
     pub result: Result<T, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingUndo {
+    pub event: CalendarEvent,
+    pub nonce: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DragState {
+    pub event: CalendarEvent,
+    pub source_date: NaiveDate,
+    pub press_pos: Point,
+    pub moved: bool,
+}
+
 #[derive(Debug)]
 pub struct EventIndex {
     pub events: Vec<CalendarEvent>,
@@ -147,14 +161,45 @@ impl EventIndex {
                 }
             }
         }
+
+        for idxs in by_date.values_mut() {
+            idxs.sort_by(|&a, &b| {
+                let ea = &events[a];
+                let eb = &events[b];
+                let ka = (if ea.all_day { 0u8 } else { 1u8 }, ea.start);
+                let kb = (if eb.all_day { 0u8 } else { 1u8 }, eb.start);
+                ka.cmp(&kb)
+            });
+        }
+
         Self { events, by_date }
     }
 
+    #[cfg(test)]
     pub fn for_date(&self, date: NaiveDate) -> Vec<&CalendarEvent> {
-        self.by_date
-            .get(&date)
-            .map(|idxs| idxs.iter().map(|i| &self.events[*i]).collect())
-            .unwrap_or_default()
+        self.for_date_filtered(date, None)
+    }
+
+    pub fn for_date_filtered(
+        &self,
+        date: NaiveDate,
+        query: Option<&str>,
+    ) -> Vec<&CalendarEvent> {
+        let idxs = match self.by_date.get(&date) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let needle = query
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+        match needle {
+            None => idxs.iter().map(|i| &self.events[*i]).collect(),
+            Some(q) => idxs
+                .iter()
+                .map(|i| &self.events[*i])
+                .filter(|e| e.summary.to_lowercase().contains(&q))
+                .collect(),
+        }
     }
 }
 
@@ -194,6 +239,13 @@ pub struct App {
     pub form: Option<EventForm>,
     pub saving: bool,
     pub last_error: Option<String>,
+    pub pending_undo: Option<PendingUndo>,
+    pub next_undo_nonce: u64,
+    pub form_source_event: Option<CalendarEvent>,
+    pub search_query: String,
+    pub drag: Option<DragState>,
+    pub hover_date: Option<NaiveDate>,
+    pub last_desktop_foreground: bool,
 }
 
 impl App {
@@ -278,6 +330,88 @@ mod tests {
         let end = start + Duration::hours(1);
         let idx = EventIndex::new(vec![make("a", start, end, false)]);
         assert_eq!(idx.for_date(NaiveDate::from_ymd_opt(2026, 9, 21).unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn all_day_first_then_by_start() {
+        let day = NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
+
+        let ad_start = chrono::Local
+            .with_ymd_and_hms(2026, 9, 21, 0, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let ad_end = chrono::Local
+            .with_ymd_and_hms(2026, 9, 22, 0, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let t1_start = chrono::Local
+            .with_ymd_and_hms(2026, 9, 21, 15, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let t2_start = chrono::Local
+            .with_ymd_and_hms(2026, 9, 21, 9, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let events = vec![
+            make("pm", t1_start, t1_start + Duration::hours(1), false),
+            make("allday", ad_start, ad_end, true),
+            make("am", t2_start, t2_start + Duration::hours(1), false),
+        ];
+
+        let idx = EventIndex::new(events);
+        let ordered = idx.for_date(day);
+        let ids: Vec<&str> = ordered.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["allday", "am", "pm"]);
+    }
+
+    #[test]
+    fn search_filters_by_summary_case_insensitive() {
+        let day = NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
+        let mk = |id: &str, summary: &str| {
+            let start = chrono::Local
+                .with_ymd_and_hms(2026, 9, 21, 10, 0, 0)
+                .single()
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            CalendarEvent {
+                id: id.into(),
+                summary: summary.into(),
+                start,
+                end: Some(start + Duration::hours(1)),
+                color_id: None,
+                all_day: false,
+                recurring_event_id: None,
+                original_start_time: None,
+            }
+        };
+        let idx = EventIndex::new(vec![
+            mk("1", "Team Meeting"),
+            mk("2", "Lunch with Bob"),
+            mk("3", "meeting follow-up"),
+        ]);
+
+        let all = idx.for_date(day);
+        assert_eq!(all.len(), 3);
+
+        let q = idx.for_date_filtered(day, Some("meeting"));
+        assert_eq!(q.len(), 2);
+        assert!(q.iter().all(|e| e.summary.to_lowercase().contains("meeting")));
+
+        let q2 = idx.for_date_filtered(day, Some("BOB"));
+        assert_eq!(q2.len(), 1);
+        assert_eq!(q2[0].id, "2");
+
+        let q3 = idx.for_date_filtered(day, Some("  "));
+        assert_eq!(q3.len(), 3);
+
+        let q4 = idx.for_date_filtered(day, Some("zzz"));
+        assert_eq!(q4.len(), 0);
     }
 
     #[test]

@@ -49,13 +49,15 @@ fn main() -> iced::Result {
         None => (Size::new(1150.0, 850.0), Position::Default),
     };
 
+    let started_minimized = std::env::args().any(|a| a == "--minimized");
+
     App::run(iced::Settings {
         window: iced::window::Settings {
             transparent: true,
             decorations: false,
             level: iced::window::Level::Normal,
             resizable: true,
-            visible: false,
+            visible: !started_minimized,
             size,
             position,
             min_size: Some(iced::Size::new(360.0, 420.0)),
@@ -149,6 +151,7 @@ impl Application for App {
                             break;
                         }
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -214,6 +217,13 @@ impl Application for App {
                 form: None,
                 saving: false,
                 last_error: None,
+                pending_undo: None,
+                next_undo_nonce: 0,
+                form_source_event: None,
+                search_query: String::new(),
+                drag: None,
+                hover_date: None,
+                last_desktop_foreground: false,
             },
             startup_cmd,
         )
@@ -236,12 +246,12 @@ impl Application for App {
                 Some(Message::CursorMoved(position))
             }
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
-                Some(Message::ResizeEnded)
+                Some(Message::GlobalLeftUp)
             }
             _ => None,
         });
 
-        let bottom_tick = iced::time::every(std::time::Duration::from_secs(2))
+        let bottom_tick = iced::time::every(std::time::Duration::from_millis(500))
             .map(|_| Message::KeepAtBottom);
 
         let tray_tick = iced::time::every(std::time::Duration::from_millis(100))

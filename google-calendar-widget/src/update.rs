@@ -1,4 +1,4 @@
-use crate::app::{App, AppState, EditScope, EventIndex, FormMode, RecurFreq};
+use crate::app::{App, AppState, DragState, EditScope, EventIndex, FormMode, PendingUndo, RecurFreq};
 use crate::messages::Message;
 use crate::persistence;
 use crate::tray;
@@ -9,6 +9,8 @@ use tray_icon::menu::MenuEvent;
 use tray_icon::TrayIconEvent;
 
 const MIN_WINDOW_ALPHA: f32 = 0.55;
+const UNDO_WINDOW_SECS: u64 = 8;
+const DRAG_THRESHOLD_SQ: f32 = 36.0;
 
 fn schedule_win_effects() -> Command<Message> {
     Command::batch(vec![
@@ -38,9 +40,9 @@ fn apply_win_effects(alpha: f32) {
     if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
         crate::platform::windows::hide_from_taskbar(hwnd);
         crate::platform::windows::remove_minimize_box(hwnd);
-        crate::platform::windows::set_bottom(hwnd);
         crate::platform::windows::set_window_alpha(hwnd, alpha);
         crate::platform::windows::delete_taskbar_tab(hwnd);
+        crate::platform::windows::ensure_visible_bottom(hwnd);
     }
 }
 
@@ -102,6 +104,15 @@ impl App {
             }
             Message::CursorMoved(pos) => {
                 self.last_cursor = pos;
+                if let Some(d) = &mut self.drag {
+                    if !d.moved {
+                        let dx = pos.x - d.press_pos.x;
+                        let dy = pos.y - d.press_pos.y;
+                        if dx * dx + dy * dy > DRAG_THRESHOLD_SQ {
+                            d.moved = true;
+                        }
+                    }
+                }
                 if let Some((sx, sy, start_size)) = self.resize_start {
                     let dw = pos.x - sx;
                     let dh = pos.y - sy;
@@ -117,15 +128,41 @@ impl App {
                     Some((self.last_cursor.x, self.last_cursor.y, self.window_size));
                 Command::none()
             }
-            Message::ResizeEnded => {
-                self.resize_start = None;
-                self.pending_window_save = false;
-                persistence::save_window_state(
-                    self.window_position,
-                    self.window_size,
-                    self.theme.is_dark,
-                );
-                Command::none()
+            Message::GlobalLeftUp => {
+                let mut cmds: Vec<Command<Message>> = Vec::new();
+
+                if self.resize_start.is_some() {
+                    self.resize_start = None;
+                    self.pending_window_save = false;
+                    persistence::save_window_state(
+                        self.window_position,
+                        self.window_size,
+                        self.theme.is_dark,
+                    );
+                }
+
+                if let Some(drag) = self.drag.take() {
+                    let target = self.hover_date.take();
+                    if drag.moved {
+                        if let Some(target) = target {
+                            if target != drag.source_date {
+                                if let Some(cmd) = self.handle_move_event(drag, target) {
+                                    cmds.push(cmd);
+                                }
+                            }
+                        } else {
+                            crate::log::write("dnd: dropped outside any cell, cancelled");
+                        }
+                    } else {
+                        cmds.push(self.update(Message::OpenEditForm(drag.event)));
+                    }
+                }
+
+                if cmds.is_empty() {
+                    Command::none()
+                } else {
+                    Command::batch(cmds)
+                }
             }
             Message::ToggleMenu => {
                 self.menu_open = !self.menu_open;
@@ -186,9 +223,20 @@ impl App {
                 Command::none()
             }
             Message::ApplyWindowEffects => {
-                if !self.started_minimized {
-                    self.started_minimized = true;
-                    Self::show_window_with_effects()
+                #[cfg(target_os = "windows")]
+                if let Some(hwnd) =
+                    crate::platform::windows::find_hwnd("Google Calendar Widget")
+                {
+                    crate::platform::windows::install_window_proc_hook(hwnd);
+                }
+                if self.started_minimized {
+                    let hide_cmd = Command::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                        },
+                        |_| Message::HideOnStartup,
+                    );
+                    Command::batch(vec![schedule_win_effects(), hide_cmd])
                 } else {
                     schedule_win_effects()
                 }
@@ -198,10 +246,27 @@ impl App {
                 apply_win_effects(self.window_alpha);
                 Command::none()
             }
+            Message::HideOnStartup => {
+                iced::window::change_mode(
+                    iced::window::Id::MAIN,
+                    iced::window::Mode::Hidden,
+                )
+            }
             Message::KeepAtBottom => {
                 #[cfg(target_os = "windows")]
                 if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
-                    crate::platform::windows::set_bottom(hwnd);
+                    let is_desktop = crate::platform::windows::is_desktop_foreground();
+                    let was = self.last_desktop_foreground;
+                    self.last_desktop_foreground = is_desktop;
+
+                    if is_desktop {
+                        if !was {
+                            crate::log::write("keep_at_bottom: desktop mode -> force_show");
+                        }
+                        crate::platform::windows::force_show_on_desktop(hwnd);
+                    } else {
+                        crate::platform::windows::ensure_visible_bottom(hwnd);
+                    }
                 }
                 Command::none()
             }
@@ -286,6 +351,7 @@ impl App {
                 });
                 self.saving = false;
                 self.last_error = None;
+                self.form_source_event = None;
                 Command::none()
             }
             Message::OpenCreateFormForDate(date) => {
@@ -321,6 +387,7 @@ impl App {
                 });
                 self.saving = false;
                 self.last_error = None;
+                self.form_source_event = None;
                 Command::none()
             }
             Message::OpenEditForm(event) => {
@@ -378,6 +445,7 @@ impl App {
                 });
                 self.saving = false;
                 self.last_error = None;
+                self.form_source_event = Some(event);
                 Command::none()
             }
             Message::CloseForm => {
@@ -386,6 +454,7 @@ impl App {
                 }
                 self.form = None;
                 self.last_error = None;
+                self.form_source_event = None;
                 Command::none()
             }
             Message::FormTitleChanged(s) => {
@@ -533,6 +602,7 @@ impl App {
                     Ok(()) => {
                         self.form = None;
                         self.last_error = None;
+                        self.form_source_event = None;
                         self.refetch()
                     }
                     Err(e) => {
@@ -546,12 +616,117 @@ impl App {
                 self.apply_new_token(api_result.new_token);
                 match api_result.result {
                     Ok(()) => {
+                        let mut cmds: Vec<Command<Message>> = vec![self.refetch()];
+
+                        let undoable = self
+                            .form
+                            .as_ref()
+                            .map(|f| {
+                                let is_rec = f.recurring_event_id.is_some();
+                                !is_rec || f.edit_scope == EditScope::OnlyThis
+                            })
+                            .unwrap_or(false);
+
+                        if undoable {
+                            if let Some(ev) = self.form_source_event.take() {
+                                let nonce = self.next_undo_nonce;
+                                self.next_undo_nonce += 1;
+                                self.pending_undo = Some(PendingUndo { event: ev, nonce });
+                                cmds.push(Command::perform(
+                                    async move {
+                                        tokio::time::sleep(std::time::Duration::from_secs(
+                                            UNDO_WINDOW_SECS,
+                                        ))
+                                        .await;
+                                        nonce
+                                    },
+                                    Message::UndoExpired,
+                                ));
+                            }
+                        } else {
+                            self.form_source_event = None;
+                        }
+
                         self.form = None;
+                        self.last_error = None;
+                        Command::batch(cmds)
+                    }
+                    Err(e) => {
+                        self.last_error = Some(e);
+                        Command::none()
+                    }
+                }
+            }
+            Message::UndoDelete => {
+                if self.saving {
+                    return Command::none();
+                }
+                match self.handle_undo() {
+                    Some(cmd) => {
+                        self.saving = true;
+                        cmd
+                    }
+                    None => Command::none(),
+                }
+            }
+            Message::UndoExpired(nonce) => {
+                if let Some(p) = &self.pending_undo {
+                    if p.nonce == nonce {
+                        self.pending_undo = None;
+                    }
+                }
+                Command::none()
+            }
+            Message::DismissUndo => {
+                self.pending_undo = None;
+                Command::none()
+            }
+            Message::UndoCompleted(api_result) => {
+                self.saving = false;
+                self.apply_new_token(api_result.new_token);
+                match api_result.result {
+                    Ok(()) => {
+                        self.pending_undo = None;
                         self.last_error = None;
                         self.refetch()
                     }
                     Err(e) => {
-                        self.last_error = Some(e);
+                        self.last_error = Some(format!("Undo failed: {}", e));
+                        Command::none()
+                    }
+                }
+            }
+            Message::SearchQueryChanged(s) => {
+                self.search_query = s;
+                Command::none()
+            }
+            Message::SearchClear => {
+                self.search_query.clear();
+                Command::none()
+            }
+            Message::EventMouseDown { event, source_date } => {
+                self.drag = Some(DragState {
+                    event,
+                    source_date,
+                    press_pos: self.last_cursor,
+                    moved: false,
+                });
+                self.hover_date = Some(source_date);
+                Command::none()
+            }
+            Message::CellHover(date) => {
+                self.hover_date = Some(date);
+                Command::none()
+            }
+            Message::EventMoved(api_result) => {
+                self.apply_new_token(api_result.new_token);
+                match api_result.result {
+                    Ok(()) => {
+                        self.last_error = None;
+                        self.refetch()
+                    }
+                    Err(e) => {
+                        self.last_error = Some(format!("Move failed: {}", e));
                         Command::none()
                     }
                 }

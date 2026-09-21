@@ -94,6 +94,49 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
         .into()
 }
 
+fn undo_banner<'a>(app: &'a App) -> Option<Element<'a, Message>> {
+    let pending = app.pending_undo.as_ref()?;
+    let theme = &app.theme;
+
+    let label: Element<Message> = text(format!("Event deleted: {}", pending.event.summary))
+        .size(13)
+        .style(theme.text)
+        .into();
+    let undo_btn: Element<Message> = button(text("Undo").size(12))
+        .on_press(Message::UndoDelete)
+        .padding([4, 10])
+        .into();
+    let dismiss_btn: Element<Message> = button(text("X").size(12))
+        .on_press(Message::DismissUndo)
+        .padding([4, 8])
+        .into();
+
+    let inner: Element<Message> = row(vec![label, undo_btn, dismiss_btn])
+        .spacing(8)
+        .align_items(iced::Alignment::Center)
+        .into();
+
+    let bg = theme.surface_alt;
+    let border = theme.border_light;
+
+    Some(
+        container(inner)
+            .padding([6, 10])
+            .width(Length::Fill)
+            .style(move |_theme: &Theme| ContainerAppearance {
+                text_color: None,
+                background: Some(Background::Color(bg)),
+                border: Border {
+                    color: border,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                shadow: Default::default(),
+            })
+            .into(),
+    )
+}
+
 pub fn view(app: &App) -> Element<'_, Message> {
     let theme = &app.theme;
     let alpha = app.bg_alpha;
@@ -148,6 +191,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
         AppState::Ready { index } => {
             let mut items: Vec<Element<Message>> = Vec::new();
 
+            if let Some(banner) = undo_banner(app) {
+                items.push(banner);
+            }
+
             if let Some(err) = &app.last_error {
                 items.push(
                     text(format!("Error: {}", err))
@@ -161,6 +208,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 items.push(form::view_form(form, &app.palette, theme, app.saving));
             }
 
+            let drag_source_id: Option<&str> = app
+                .drag
+                .as_ref()
+                .map(|d| d.event.id.as_str());
+
+            let drop_target = match &app.drag {
+                Some(d) if d.moved => app.hover_date,
+                _ => None,
+            };
+
             let cal: Element<Message> = ui::build_view(
                 layout,
                 app.selected,
@@ -169,6 +226,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 theme,
                 app.window_size.width,
                 app.window_size.height,
+                &app.search_query,
+                drag_source_id,
+                drop_target,
             );
             items.push(cal);
 

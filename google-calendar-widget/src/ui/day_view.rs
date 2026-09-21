@@ -14,9 +14,12 @@ pub fn build_view<'a>(
     theme: &'a AppTheme,
     width: f32,
     height: f32,
+    search_query: &str,
 ) -> Element<'a, crate::Message> {
     let ef = event_font(width);
-    let day_events = index.for_date(selected);
+    let search_active = !search_query.trim().is_empty();
+    let q: Option<&str> = if search_active { Some(search_query) } else { None };
+    let day_events = index.for_date_filtered(selected, q);
 
     let title = selected.format("%A %d %B %Y").to_string();
 
@@ -30,9 +33,14 @@ pub fn build_view<'a>(
 
     let mut evs: Vec<Element<'a, crate::Message>> = Vec::new();
     if day_events.is_empty() {
+        let msg = if search_active {
+            "No matching events"
+        } else {
+            "No events"
+        };
         evs.push(
             container(
-                text("Nessun evento")
+                text(msg)
                     .size(ef)
                     .style(theme.text_muted),
             )
@@ -43,7 +51,13 @@ pub fn build_view<'a>(
         );
     } else {
         for event in day_events.iter() {
-            evs.push(render_event_box(event, palette, EventBoxStyle::day(ef)));
+            evs.push(render_event_box(
+                event,
+                palette,
+                EventBoxStyle::day(ef),
+                selected,
+                false,
+            ));
         }
     }
 

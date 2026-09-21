@@ -1,5 +1,6 @@
 use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
+use chrono::NaiveDate;
 use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{column, container, mouse_area, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
@@ -91,6 +92,8 @@ pub fn render_event_box<'a>(
     event: &'a CalendarEvent,
     palette: &'a ColorPalette,
     style: EventBoxStyle,
+    source_date: NaiveDate,
+    dragging: bool,
 ) -> Element<'a, crate::Message> {
     let (bg, fg) = event_colors(event, palette);
 
@@ -135,20 +138,42 @@ pub fn render_event_box<'a>(
         ev_container = ev_container.height(Length::Fixed(h));
     }
 
+    let drag_border = Color::from_rgba(0.35, 0.55, 0.90, 0.95);
+    let dim_bg = Color { a: 0.35, ..bg };
+
     let ev_box: Element<'a, crate::Message> = ev_container
-        .style(move |_theme: &Theme| ContainerAppearance {
-            text_color: Some(fg),
-            background: Some(Background::Color(bg)),
-            border: Border {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-                radius: style.radius.into(),
-            },
-            shadow: Default::default(),
+        .style(move |_theme: &Theme| {
+            if dragging {
+                ContainerAppearance {
+                    text_color: Some(fg),
+                    background: Some(Background::Color(dim_bg)),
+                    border: Border {
+                        color: drag_border,
+                        width: 2.0,
+                        radius: style.radius.into(),
+                    },
+                    shadow: Default::default(),
+                }
+            } else {
+                ContainerAppearance {
+                    text_color: Some(fg),
+                    background: Some(Background::Color(bg)),
+                    border: Border {
+                        color: Color::TRANSPARENT,
+                        width: 0.0,
+                        radius: style.radius.into(),
+                    },
+                    shadow: Default::default(),
+                }
+            }
         })
         .into();
 
     mouse_area(ev_box)
-        .on_press(crate::Message::OpenEditForm(event.clone()))
+        .on_press(crate::Message::EventMouseDown {
+            event: event.clone(),
+            source_date,
+        })
+        .on_move(move |_| crate::Message::CellHover(source_date))
         .into()
 }

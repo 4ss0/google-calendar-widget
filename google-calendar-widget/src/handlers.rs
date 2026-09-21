@@ -1,8 +1,8 @@
-use crate::app::{ApiResult, App, EditScope, FormMode};
+use crate::app::{ApiResult, App, DragState, EditScope, FormMode};
 use crate::messages::Message;
 use crate::persistence;
 use crate::ui;
-use chrono::{DateTime, Datelike, Duration, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use iced::Command;
 
 impl App {
@@ -230,10 +230,14 @@ impl App {
                                 .map(|_| ())
                             } else if is_recurring && scope == EditScope::All {
                                 let base = recurring_event_id.unwrap();
-                                crate::api::client::update_event(
+                                let orig = original_start.ok_or_else(|| {
+                                    "Missing original start time".to_string()
+                                })?;
+                                crate::api::client::update_event_all_occurrences(
                                     &access,
                                     &calendar_id,
                                     &base,
+                                    orig,
                                     &title,
                                     start_utc,
                                     end_utc,
@@ -322,6 +326,125 @@ impl App {
                 },
             ),
             Message::EventDeleted,
+        ))
+    }
+
+    pub fn handle_undo(&mut self) -> Option<Command<Message>> {
+        let pending = self.pending_undo.take()?;
+        let token = match &self.access_token {
+            Some(t) => t.clone(),
+            None => {
+                self.pending_undo = Some(pending);
+                return None;
+            }
+        };
+        let calendar_id = self.config.calendar_id.clone();
+        let client_id = self.config.client_id.clone();
+        let client_secret = self.config.client_secret.clone();
+        let refresh_token = self.refresh_token.clone();
+        let expires_at = self.expires_at;
+
+        let summary = pending.event.summary.clone();
+        let start = pending.event.start;
+        let end = pending
+            .event
+            .end
+            .unwrap_or(pending.event.start + Duration::hours(1));
+        let color_id = pending.event.color_id.clone();
+        let all_day = pending.event.all_day;
+
+        crate::log::write(&format!(
+            "undo: recreating deleted event summary={:?} start={}",
+            summary, start
+        ));
+
+        Some(Command::perform(
+            run_with_token(
+                client_id,
+                client_secret,
+                token,
+                expires_at,
+                refresh_token,
+                move |access| async move {
+                    crate::api::client::create_event(
+                        &access,
+                        &calendar_id,
+                        &summary,
+                        start,
+                        end,
+                        color_id.as_deref(),
+                        all_day,
+                        None,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                },
+            ),
+            Message::UndoCompleted,
+        ))
+    }
+
+    pub fn handle_move_event(
+        &mut self,
+        drag: DragState,
+        target: NaiveDate,
+    ) -> Option<Command<Message>> {
+        let token = match &self.access_token {
+            Some(t) => t.clone(),
+            None => return None,
+        };
+        let calendar_id = self.config.calendar_id.clone();
+        let client_id = self.config.client_id.clone();
+        let client_secret = self.config.client_secret.clone();
+        let refresh_token = self.refresh_token.clone();
+        let expires_at = self.expires_at;
+
+        let delta_days = (target - drag.source_date).num_days();
+        if delta_days == 0 {
+            return None;
+        }
+
+        crate::log::write(&format!(
+            "dnd: move id={} from {} to {} (delta={}d)",
+            drag.event.id, drag.source_date, target, delta_days
+        ));
+
+        let event = drag.event;
+        let instance_id = event.id.clone();
+        let summary = event.summary.clone();
+        let color_id = event.color_id.clone();
+        let all_day = event.all_day;
+        let new_start = event.start + Duration::days(delta_days);
+        let new_end = event
+            .end
+            .unwrap_or(event.start + Duration::hours(1))
+            + Duration::days(delta_days);
+
+        Some(Command::perform(
+            run_with_token(
+                client_id,
+                client_secret,
+                token,
+                expires_at,
+                refresh_token,
+                move |access| async move {
+                    crate::api::client::update_event(
+                        &access,
+                        &calendar_id,
+                        &instance_id,
+                        &summary,
+                        new_start,
+                        new_end,
+                        color_id.as_deref(),
+                        all_day,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                },
+            ),
+            Message::EventMoved,
         ))
     }
 }

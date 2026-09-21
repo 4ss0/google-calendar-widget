@@ -43,16 +43,41 @@ pub fn build_view<'a>(
     theme: &'a AppTheme,
     width: f32,
     height: f32,
+    search_query: &str,
+    drag_source_id: Option<&'a str>,
+    drop_target: Option<NaiveDate>,
 ) -> Element<'a, crate::Message> {
     match layout {
-        Layout::Month => {
-            super::month_view::build_view(selected, index, palette, theme, width, height)
-        }
-        Layout::Week => {
-            super::week_view::build_view(selected, index, palette, theme, width, height)
-        }
-        Layout::Day => {
-            super::day_view::build_view(selected, index, palette, theme, width, height)
-        }
+        Layout::Month => super::month_view::build_view(
+            selected,
+            index,
+            palette,
+            theme,
+            width,
+            height,
+            search_query,
+            drag_source_id,
+            drop_target,
+        ),
+        Layout::Week => super::week_view::build_view(
+            selected,
+            index,
+            palette,
+            theme,
+            width,
+            height,
+            search_query,
+            drag_source_id,
+            drop_target,
+        ),
+        Layout::Day => super::day_view::build_view(
+            selected,
+            index,
+            palette,
+            theme,
+            width,
+            height,
+            search_query,
+        ),
     }
 }

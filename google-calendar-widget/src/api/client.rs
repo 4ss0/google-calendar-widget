@@ -318,6 +318,62 @@ pub async fn update_event(
     convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
+pub async fn update_event_all_occurrences(
+    access_token: &str,
+    calendar_id: &str,
+    base_event_id: &str,
+    original_start: DateTime<Utc>,
+    summary: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    color_id: Option<&str>,
+    all_day: bool,
+) -> anyhow::Result<CalendarEvent> {
+    let base = get_event_raw(access_token, calendar_id, base_event_id).await?;
+
+    let (base_start, _) = parse_datetime(&base.start)
+        .ok_or_else(|| anyhow::anyhow!("Base event has no valid start"))?;
+    let base_end = base
+        .end
+        .as_ref()
+        .and_then(|edt| parse_datetime(edt).map(|(d, _)| d));
+
+    let delta = start - original_start;
+    let new_master_start = base_start + delta;
+    let new_master_end = match base_end {
+        Some(e) => e + delta,
+        None => end,
+    };
+
+    let url = format!(
+        "{}/calendars/{}/events/{}",
+        BASE,
+        urlencoding::encode(calendar_id),
+        urlencoding::encode(base_event_id)
+    );
+    let (sb, eb) = datetime_body(new_master_start, new_master_end, all_day);
+    let body = EventBody {
+        summary: summary.to_string(),
+        start: sb,
+        end: eb,
+        color_id: color_id.map(|s| s.to_string()),
+        recurrence: None,
+    };
+    let resp = http()
+        .patch(&url)
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("API error {}: {}", status, body);
+    }
+    let event: GoogleEvent = resp.json().await?;
+    convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
+}
+
 pub async fn update_event_this_and_following(
     access_token: &str,
     calendar_id: &str,
@@ -364,13 +420,8 @@ pub async fn update_event_this_and_following(
         urlencoding::encode(calendar_id),
         urlencoding::encode(base_event_id)
     );
-    let (sb, eb) = datetime_body(start, end, all_day);
-    let patch_body = EventBody {
-        summary: summary.to_string(),
-        start: sb,
-        end: eb,
-        color_id: color_id.map(|s| s.to_string()),
-        recurrence: Some(vec![truncated]),
+    let patch_body = RecurrencePatchBody {
+        recurrence: vec![truncated],
     };
     let resp = http()
         .patch(&url_base)

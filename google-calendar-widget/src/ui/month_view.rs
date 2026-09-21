@@ -16,6 +16,9 @@ pub fn build_view<'a>(
     theme: &'a AppTheme,
     width: f32,
     height: f32,
+    search_query: &str,
+    drag_source_id: Option<&'a str>,
+    drop_target: Option<NaiveDate>,
 ) -> Element<'a, crate::Message> {
     let year = selected.year();
     let month = selected.month();
@@ -24,6 +27,12 @@ pub fn build_view<'a>(
     let total_days = days_in_month(year, month);
     let start_weekday = first_day.weekday().num_days_from_monday();
     let weeks_needed = ((start_weekday + total_days + 6) / 7) as u32;
+
+    let q: Option<&str> = if search_query.trim().is_empty() {
+        None
+    } else {
+        Some(search_query)
+    };
 
     let df = day_font(width);
     let ef = event_font(width);
@@ -65,9 +74,10 @@ pub fn build_view<'a>(
                 days_row.push(empty);
             } else {
                 let date = NaiveDate::from_ymd_opt(year, month, current_day).unwrap();
-                let day_events = index.for_date(date);
+                let day_events = index.for_date_filtered(date, q);
                 let is_today = date == today;
                 let is_weekend = weekday >= 5;
+                let is_drop_target = drop_target == Some(date);
                 days_row.push(render_day(
                     date,
                     current_day,
@@ -79,6 +89,8 @@ pub fn build_view<'a>(
                     df,
                     ef,
                     max_events,
+                    drag_source_id,
+                    is_drop_target,
                 ));
                 current_day += 1;
             }
@@ -108,6 +120,8 @@ fn render_day<'a>(
     df: u16,
     ef: u16,
     max_events: usize,
+    drag_source_id: Option<&'a str>,
+    is_drop_target: bool,
 ) -> Element<'a, crate::Message> {
     let day_num_color = if is_today {
         Color::WHITE
@@ -148,7 +162,14 @@ fn render_day<'a>(
     };
 
     for event in events.iter().take(shown) {
-        day_children.push(render_event_box(event, palette, EventBoxStyle::month(ef)));
+        let dragging = drag_source_id == Some(event.id.as_str());
+        day_children.push(render_event_box(
+            event,
+            palette,
+            EventBoxStyle::month(ef),
+            date,
+            dragging,
+        ));
     }
 
     if show_more {
@@ -161,7 +182,9 @@ fn render_day<'a>(
 
     let day_col: Element<'a, crate::Message> = column(day_children).spacing(3).into();
 
-    let cell_bg = if is_today {
+    let cell_bg = if is_drop_target {
+        Color::from_rgba(0.35, 0.55, 0.90, 0.20)
+    } else if is_today {
         theme.today_bg
     } else if is_weekend {
         theme.cell_bg_weekend
@@ -169,11 +192,15 @@ fn render_day<'a>(
         theme.cell_bg
     };
 
-    let cell_border = if is_today {
+    let cell_border = if is_drop_target {
+        Color::from_rgba(0.35, 0.55, 0.90, 0.95)
+    } else if is_today {
         theme.today_border
     } else {
         theme.border_light
     };
+
+    let cell_border_w = if is_drop_target { 2.0 } else { 1.0 };
 
     let cell_text = theme.text;
 
@@ -186,7 +213,7 @@ fn render_day<'a>(
             background: Some(Background::Color(cell_bg)),
             border: Border {
                 color: cell_border,
-                width: 1.0,
+                width: cell_border_w,
                 radius: 6.0.into(),
             },
             shadow: Default::default(),
@@ -195,6 +222,7 @@ fn render_day<'a>(
 
     mouse_area(cell)
         .on_press(crate::Message::OpenCreateFormForDate(date))
+        .on_move(move |_| crate::Message::CellHover(date))
         .into()
 }
 
