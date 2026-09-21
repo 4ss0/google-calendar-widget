@@ -162,14 +162,19 @@ fn datetime_body(
     }
 }
 
-fn rrule_with_until(rrule: &str, until: DateTime<Utc>) -> String {
+fn rrule_with_until(rrule: &str, until: DateTime<Utc>, all_day: bool) -> String {
     let parts: Vec<&str> = rrule.split(';').collect();
     let mut filtered: Vec<String> = parts
         .into_iter()
         .filter(|p| !p.starts_with("UNTIL="))
         .map(|s| s.to_string())
         .collect();
-    filtered.push(format!("UNTIL={}", until.format("%Y%m%dT%H%M%SZ")));
+    if all_day {
+        let local = until.with_timezone(&chrono::Local);
+        filtered.push(format!("UNTIL={}", local.format("%Y%m%d")));
+    } else {
+        filtered.push(format!("UNTIL={}", until.format("%Y%m%dT%H%M%SZ")));
+    }
     filtered.join(";")
 }
 
@@ -413,7 +418,7 @@ pub async fn update_event_this_and_following(
     }
 
     let split_until = original_start - Duration::seconds(1);
-    let truncated = rrule_with_until(&rrule, split_until);
+    let truncated = rrule_with_until(&rrule, split_until, all_day);
     let new_series_rrule = rrule_without_until(&rrule);
 
     let url_base = format!(
@@ -479,7 +484,7 @@ pub async fn delete_event_this_and_following(
         .and_then(|v| v.first().cloned())
         .ok_or_else(|| anyhow::anyhow!("Event is not recurring"))?;
 
-    let (base_start, _) = parse_datetime(&base.start)
+    let (base_start, all_day) = parse_datetime(&base.start)
         .ok_or_else(|| anyhow::anyhow!("Base event has no valid start"))?;
 
     if base_start >= original_start {
@@ -487,7 +492,7 @@ pub async fn delete_event_this_and_following(
     }
 
     let split_until = original_start - Duration::seconds(1);
-    let truncated = rrule_with_until(&rrule, split_until);
+    let truncated = rrule_with_until(&rrule, split_until, all_day);
 
     let url_base = format!(
         "{}/calendars/{}/events/{}",

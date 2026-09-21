@@ -161,7 +161,12 @@ impl App {
                 if !until.is_empty() {
                     match chrono::NaiveDate::parse_from_str(until, "%Y-%m-%d") {
                         Ok(d) => {
-                            rrule.push_str(&format!(";UNTIL={}T235959Z", d.format("%Y%m%d")));
+                            if form.all_day {
+                                rrule.push_str(&format!(";UNTIL={}", d.format("%Y%m%d")));
+                            } else {
+                                rrule
+                                    .push_str(&format!(";UNTIL={}T235959Z", d.format("%Y%m%d")));
+                            }
                         }
                         Err(_) => {
                             self.last_error =
