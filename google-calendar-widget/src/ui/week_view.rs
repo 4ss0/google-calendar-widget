@@ -1,3 +1,9 @@
+//! Week view: 7 equal columns, one per day, each with a header (weekday
+//! abbreviation + day number) and a scrollable list of events below.
+//!
+//! Unlike the month view, there's no cell height budget: columns scroll if
+//! there are more events than fit.
+
 use super::common::{render_event_box, EventBoxStyle};
 use super::layout::event_font;
 use crate::api::client::CalendarEvent;
@@ -9,6 +15,7 @@ use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{column, container, mouse_area, row, scrollable, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_view<'a>(
     selected: NaiveDate,
     index: &'a EventIndex,
@@ -21,6 +28,7 @@ pub fn build_view<'a>(
     drop_target: Option<NaiveDate>,
 ) -> Element<'a, crate::Message> {
     let today = chrono::Local::now().date_naive();
+    // `selected` is treated as the first day of the week.
     let start = selected;
     let ef = event_font(width);
 
@@ -52,6 +60,7 @@ pub fn build_view<'a>(
     row(cols).spacing(4).height(Length::Fill).into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_day_column<'a>(
     date: NaiveDate,
     events: &[&'a CalendarEvent],
@@ -69,6 +78,7 @@ fn render_day_column<'a>(
     let header_color = if is_today { Color::WHITE } else { theme.text };
     let accent = theme.accent;
 
+    // Today's header gets a filled accent background.
     let header_bg = if is_today {
         Some(Background::Color(accent))
     } else {
@@ -115,6 +125,9 @@ fn render_day_column<'a>(
 
     let ev_col: Element<'a, crate::Message> = column(evs).spacing(4).into();
 
+    // Estimate how many events fit before deciding to wrap in a scrollable.
+    // Same heuristic used by day_view to avoid rendering unnecessary scroll
+    // containers (which would eat input events over the whole column).
     let available = (height - 150.0).max(0.0);
     let event_h = (ef as f32) * 2.5 + 22.0;
     let max_events = (available / event_h).floor() as usize;

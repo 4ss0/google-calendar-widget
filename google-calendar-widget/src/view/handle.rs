@@ -1,3 +1,7 @@
+//! Bottom-right resize handle. Pressing it enters resize mode (see
+//! StartResize in update.rs); actual resizing happens on CursorMoved until
+//! the left mouse button is released.
+
 use crate::messages::Message;
 use crate::ui::AppTheme;
 use iced::widget::container::Appearance as ContainerAppearance;
@@ -5,6 +9,7 @@ use iced::widget::{container, mouse_area, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
 pub fn view_handle<'a>(theme: &'a AppTheme) -> Element<'a, Message> {
+    // Subtle fill and border; slightly brighter in dark mode.
     let bg = if theme.is_dark {
         Color::from_rgba(0.7, 0.7, 0.8, 0.10)
     } else {
@@ -34,6 +39,8 @@ pub fn view_handle<'a>(theme: &'a AppTheme) -> Element<'a, Message> {
     .on_press(Message::StartResize)
     .into();
 
+    // The handle itself is small but sits in a full-width row aligned to the
+    // bottom-right corner, giving it a comfortable click target.
     container(handle)
         .width(Length::Fill)
         .height(Length::Fixed(20.0))

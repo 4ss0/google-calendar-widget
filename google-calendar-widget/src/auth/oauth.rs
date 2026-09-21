@@ -1,3 +1,15 @@
+//! OAuth 2.0 authorization code flow with PKCE, plus refresh-token storage.
+//!
+//! Flow:
+//!   1. Bind a loopback TcpListener on an ephemeral port.
+//!   2. Build the Google consent URL (PKCE S256) and open the browser.
+//!   3. Accept a single HTTP request on the loopback address; extract `code`.
+//!   4. Exchange `code` for tokens at the token endpoint.
+//!   5. Persist the refresh token (DPAPI-encrypted) via save_refresh_token.
+//!
+//! Only the `calendar.events` scope is requested; `access_type=offline` plus
+//! `prompt=consent` are needed to reliably get a refresh_token.
+
 use crate::config::{AppConfig, StoredToken};
 use base64::Engine;
 use rand::Rng;
@@ -21,6 +33,8 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
+/// Generates a PKCE verifier (43-128 chars, base62 is safe) and its S256
+/// challenge (base64url-encoded SHA-256 of the verifier, unpadded).
 fn generate_pkce() -> (String, String) {
     let mut rng = rand::thread_rng();
     let verifier: String = (0..64)
@@ -40,12 +54,16 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
+/// Full interactive OAuth flow. Opens the browser, waits for the loopback
+/// callback (up to AUTH_TIMEOUT_SECS), and exchanges the code for tokens.
 pub async fn run_full_auth_flow(
     client_id: &str,
     client_secret: &str,
 ) -> anyhow::Result<StoredToken> {
     crate::log::write("auth: starting full auth flow");
 
+    // Port 0 => OS picks an ephemeral port. Google desktop clients allow any
+    // loopback port as redirect_uri.
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{}{}", port, CALLBACK_PATH);
@@ -73,6 +91,8 @@ pub async fn run_full_auth_flow(
     let mut code: Option<String> = None;
     let mut error: Option<String> = None;
 
+    // Accept connections until we get the callback (favicon requests etc. may
+    // arrive first; those are answered with 404 and ignored).
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -105,12 +125,17 @@ pub async fn run_full_auth_flow(
             continue;
         }
 
+        // Parse query string manually: only `code` and `error` matter.
+        // `application/x-www-form-urlencoded` encodes spaces as '+', so we
+        // replace those before percent-decoding.
         let query = path.split('?').nth(1).unwrap_or("");
         for pair in query.split('&') {
             let mut kv = pair.splitn(2, '=');
             let k = kv.next().unwrap_or("");
             let v = kv.next().unwrap_or("");
-            let v = urlencoding::decode(v).unwrap_or_default().to_string();
+            let v = urlencoding::decode(&v.replace('+', " "))
+                .unwrap_or_default()
+                .to_string();
             if k == "code" {
                 code = Some(v);
             } else if k == "error" {
@@ -143,6 +168,7 @@ pub async fn run_full_auth_flow(
     let code = code.ok_or_else(|| anyhow::anyhow!("Code not found in redirect"))?;
     crate::log::write("auth: received authorization code");
 
+    // Exchange code for tokens.
     let client = reqwest::Client::new();
     let params = [
         ("client_id", client_id),
@@ -183,6 +209,8 @@ pub async fn run_full_auth_flow(
     })
 }
 
+/// Exchanges a refresh token for a fresh access token. Google may return a new
+/// refresh token; if not, we keep the old one.
 pub async fn refresh_access_token(
     client_id: &str,
     client_secret: &str,
@@ -224,6 +252,7 @@ pub async fn refresh_access_token(
     })
 }
 
+/// Persists the refresh token encrypted with DPAPI.
 pub fn save_refresh_token(token: &str) -> anyhow::Result<()> {
     let path = AppConfig::token_path();
     crate::log::write(&format!(
@@ -243,6 +272,9 @@ pub fn save_refresh_token(token: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Loads the refresh token from disk. Tries the encrypted file first, then the
+/// legacy plaintext one (migrating it if found). Returns None if neither
+/// exists or can be decrypted.
 pub fn load_refresh_token() -> Option<String> {
     let primary = AppConfig::token_path();
     crate::log::write(&format!(
@@ -275,6 +307,9 @@ pub fn load_refresh_token() -> Option<String> {
                 ));
             }
         }
+        // Deliberately do NOT delete the file on failure: the user may have a
+        // temporary DPAPI issue (e.g. profile corruption) and we don't want to
+        // destroy the only copy of their token.
         crate::log::write(
             "load_refresh_token: NOT deleting file on failure (fix), returning None",
         );
@@ -282,6 +317,7 @@ pub fn load_refresh_token() -> Option<String> {
         crate::log::write("load_refresh_token: load_encrypted returned None");
     }
 
+    // Legacy plaintext file (pre-DPAPI builds).
     let legacy = AppConfig::legacy_token_path();
     if let Ok(s) = std::fs::read_to_string(&legacy) {
         let trimmed = s.trim().to_string();
@@ -297,6 +333,7 @@ pub fn load_refresh_token() -> Option<String> {
     None
 }
 
+/// Deletes both the encrypted and legacy token files. Used by "Re-authenticate".
 pub fn delete_refresh_token() {
     crate::log::write("delete_refresh_token: called");
     let _ = std::fs::remove_file(AppConfig::token_path());

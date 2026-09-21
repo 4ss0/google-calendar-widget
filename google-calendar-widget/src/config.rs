@@ -1,3 +1,13 @@
+//! Persistent configuration: OAuth credentials, calendar id, refresh token,
+//! and window geometry.
+//!
+//! Sensitive files (config.bin, refresh_token.bin) are encrypted with DPAPI
+//! (see crypto.rs). Legacy plaintext files (config.json, refresh_token.txt)
+//! are read once and migrated automatically.
+//!
+//! Files live under the platform config dir, e.g. on Windows:
+//! `%APPDATA%\example\gcal-widget\config\`.
+
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -12,7 +22,9 @@ pub struct AppConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StoredToken {
     pub access_token: String,
+    /// Long-lived token used to silently refresh `access_token`.
     pub refresh_token: Option<String>,
+    /// Unix timestamp (seconds) of access token expiry.
     pub expires_at: i64,
 }
 
@@ -22,8 +34,15 @@ pub struct WindowState {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Theme preference persisted alongside geometry.
     #[serde(default)]
     pub dark_mode: bool,
+    /// True if the window position was never explicitly observed (the OS
+    /// picked it). In that case `x`/`y` are meaningless and the next launch
+    /// should ask the OS to choose the position again, instead of pinning
+    /// the window to (0,0).
+    #[serde(default)]
+    pub position_is_default: bool,
 }
 
 impl AppConfig {
@@ -54,11 +73,16 @@ impl AppConfig {
         Self::config_dir().join("window.json")
     }
 
+    /// Loads config from disk. Order of precedence:
+    ///   1. Encrypted config.bin
+    ///   2. Legacy plaintext config.json (migrated on success)
+    ///   3. GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env vars
     pub fn load() -> Option<Self> {
         if let Some(bytes) = crate::crypto::load_encrypted(&Self::config_path()) {
             if let Ok(cfg) = serde_json::from_slice::<AppConfig>(&bytes) {
                 return Some(cfg);
             }
+            // Corrupted payload: drop it so we don't loop forever.
             let _ = std::fs::remove_file(Self::config_path());
         }
 

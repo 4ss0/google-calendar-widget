@@ -1,30 +1,48 @@
+# Project manifest for the Google Calendar Widget desktop application.
+# Windows-only desktop overlay that displays Google Calendar events on the user's
+# desktop background. See src/main.rs for the crate root and module layout.
+
 [package]
 name = "google-calendar-widget"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# GUI framework (Elm-style). "tokio" enables the async executor, "advanced"
+# enables custom container styling used throughout the ui/ and view/ modules.
 iced = { version = "0.12.1", features = ["tokio", "advanced"] }
 tokio = { version = "1", features = ["full"] }
+# Rustls is used instead of native-tls to avoid an OpenSSL dependency on Windows.
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Loads .env at startup for optional GOOGLE_CLIENT_ID / SECRET / CALENDAR_ID.
 dotenvy = "0.15"
+# Resolves the platform-specific config directory (AppData on Windows).
 directories = "5"
-tracing = "0.1"
-tracing-subscriber = "0.3"
 anyhow = "1"
 urlencoding = "2"
+# PKCE: SHA-256 + base64url for the OAuth code challenge (see auth/oauth.rs).
 sha2 = "0.10"
 base64 = "0.22"
+# Random code verifier for PKCE.
 rand = "0.8"
-url = "2"
+# Opens the system browser for the OAuth consent screen.
 open = "5"
 tray-icon = "0.13"
+# IANA timezone name used when writing events back to the Calendar API.
 iana-time-zone = "0.1"
 
 [target.'cfg(windows)'.dependencies]
+# Win32 bindings. Each feature gates a specific namespace we use:
+#   - Foundation: HWND, BOOL, HLOCAL, etc.
+#   - WindowsAndMessaging: FindWindowW, SetWindowPos, ShowWindow, hooks.
+#   - Shell: ITaskbarList (remove the window from the taskbar).
+#   - Com: CoInitializeEx, CoCreateInstance.
+#   - Registry: autostart entry + dark mode detection.
+#   - Cryptography: DPAPI (CryptProtectData / CryptUnprotectData).
+#   - Dwm: DwmFlush and cloaked-window detection.
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -33,5 +51,4 @@ windows = { version = "0.58", features = [
     "Win32_System_Registry",
     "Win32_Security_Cryptography",
     "Win32_Graphics_Dwm",
-    "Win32_UI_Accessibility",
 ] }

@@ -1,3 +1,7 @@
+//! Top-level view composition: wraps the current state's content in the app
+//! shell (outer container, optional resize handle) and dispatches to the
+//! specific screen based on AppState.
+
 mod form;
 mod handle;
 mod setup;
@@ -10,12 +14,16 @@ use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
+/// Outer container style: rounded, semi-transparent, subtle border.
+/// `alpha` is applied to the theme background color so the desktop shows
+/// through the widget.
 fn outer_style(
     theme: &ui::AppTheme,
     alpha: f32,
 ) -> impl Fn(&Theme) -> ContainerAppearance + 'static {
     let base = theme.bg;
     let bg_color = Color::from_rgba(base.r, base.g, base.b, alpha);
+    // Border derives from alpha so it fades in/out with the background.
     let border_color = if theme.is_dark {
         Color::from_rgba(0.25, 0.25, 0.32, (alpha * 0.9).min(0.9))
     } else {
@@ -34,6 +42,8 @@ fn outer_style(
     }
 }
 
+/// Wraps `content` in the outer rounded container and adds the bottom-right
+/// resize handle below it.
 fn wrap_with_handle<'a>(
     content: Element<'a, Message>,
     theme: &'a ui::AppTheme,
@@ -55,6 +65,8 @@ fn wrap_with_handle<'a>(
         .into()
 }
 
+/// Minimal top bar used only in Setup mode: title + optional Cancel (only
+/// when the wizard was opened from a running session) + Close.
 fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
     let theme = &app.theme;
 
@@ -66,6 +78,7 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
     .padding([4, 6])
     .into();
 
+    // A full-width invisible area that initiates an OS-level window drag.
     let drag_area: Element<Message> = mouse_area(
         container(text(""))
             .width(Length::Fill)
@@ -74,6 +87,7 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
     .on_press(Message::StartDrag)
     .into();
 
+    // Cancel is only shown when there's a previous state to restore.
     let cancel_btn: Element<Message> = if app.state_before_setup.is_some() {
         button(text("Cancel").size(12))
             .on_press(Message::SetupCancel)
@@ -94,6 +108,8 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
         .into()
 }
 
+/// Undo banner shown after deleting an event (until UNDO_WINDOW_SECS expires
+/// or the user dismisses it). Returns None when there's no pending undo.
 fn undo_banner<'a>(app: &'a App) -> Option<Element<'a, Message>> {
     let pending = app.pending_undo.as_ref()?;
     let theme = &app.theme;
@@ -137,6 +153,12 @@ fn undo_banner<'a>(app: &'a App) -> Option<Element<'a, Message>> {
     )
 }
 
+/// Main view entry point. Dispatches on AppState:
+///   - Setup: setup wizard with its own minimal top bar.
+///   - WaitingAuth: "authorization in progress" screen.
+///   - Loading: spinner placeholder.
+///   - Ready: top bar + undo banner + form + calendar grid.
+///   - Error: error message + Retry/Re-authenticate/Configure buttons.
 pub fn view(app: &App) -> Element<'_, Message> {
     let theme = &app.theme;
     let alpha = app.bg_alpha;
@@ -195,6 +217,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 items.push(banner);
             }
 
+            // Inline error message (e.g. failed save) above the calendar.
             if let Some(err) = &app.last_error {
                 items.push(
                     text(format!("Error: {}", err))
@@ -204,6 +227,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 );
             }
 
+            // The event form (create/edit) overlays the calendar inline.
             if let Some(form) = &app.form {
                 items.push(form::view_form(form, &app.palette, theme, app.saving));
             }
@@ -213,6 +237,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .as_ref()
                 .map(|d| d.event.id.as_str());
 
+            // Only show a drop target while the drag is "real" (past threshold).
             let drop_target = match &app.drag {
                 Some(d) if d.moved => app.hover_date,
                 _ => None,
@@ -243,6 +268,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .size(16)
                 .style(theme.text)
                 .into();
+            // Guidance to avoid unnecessary re-auth when it's just a network issue.
             let hint: Element<Message> = text(
                 "If the problem is a missing internet connection, click Retry once it is back. \
                  Use \"Re-authenticate\" only if you want to sign in with a different account.",

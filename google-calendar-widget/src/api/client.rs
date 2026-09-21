@@ -1,3 +1,21 @@
+//! Google Calendar REST v3 client.
+//!
+//! Responsibilities:
+//!   - Fetch events in a time range (paginated, singleEvents=true so recurring
+//!     events are expanded into individual instances).
+//!   - Create / update / delete single events.
+//!   - Update / delete a recurring series, including the "this and following"
+//!     case which is implemented by truncating the master with UNTIL and
+//!     creating a brand-new series.
+//!
+//! Google returns "dateTime" (RFC3339) for timed events and "date" (YYYY-MM-DD)
+//! for all-day events. `parse_datetime` normalizes both to a UTC DateTime plus
+//! an `all_day` flag. This is important because all-day end dates are
+//! *exclusive* in the API (an all-day event on 21 Sep has end 22 Sep).
+//!
+//! All requests go through a shared `reqwest::Client` (connection pooling,
+//! timeouts, user-agent) created lazily with OnceLock.
+
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -7,6 +25,7 @@ const USER_AGENT: &str = "google-calendar-widget/0.1.0";
 
 static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Returns the shared HTTP client, initializing it on first call.
 fn http() -> &'static reqwest::Client {
     HTTP.get_or_init(|| {
         reqwest::Client::builder()
@@ -19,10 +38,15 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
+/// Returns the IANA name of the local timezone (e.g. "Europe/Rome"), or "UTC"
+/// if it cannot be determined. Sent as `timeZone` for timed events so Google
+/// stores the correct wall-clock time regardless of DST transitions.
 fn local_timezone_name() -> String {
     iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string())
 }
 
+/// Wire format for the start/end of an event. Exactly one of the two variants
+/// is populated depending on whether the event is all-day or timed.
 #[derive(Debug, Deserialize, Clone)]
 struct EventDateTime {
     #[serde(rename = "dateTime")]
@@ -30,6 +54,8 @@ struct EventDateTime {
     date: Option<String>,
 }
 
+/// Raw event as returned by the API. Fields not needed by the widget are
+/// dropped; serde ignores unknown fields by default.
 #[derive(Debug, Deserialize, Clone)]
 struct GoogleEvent {
     id: String,
@@ -38,18 +64,27 @@ struct GoogleEvent {
     end: Option<EventDateTime>,
     #[serde(rename = "colorId")]
     color_id: Option<String>,
+    /// Present on instances of a recurring series; identifies the master.
     #[serde(rename = "recurringEventId")]
     recurring_event_id: Option<String>,
+    /// Original scheduled start of an instance (may differ from `start` if the
+    /// instance was moved).
     #[serde(rename = "originalStartTime")]
     original_start_time: Option<EventDateTime>,
+    /// RRULE lines (only present on the master of a series).
     recurrence: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct EventsResponse {
     items: Option<Vec<GoogleEvent>>,
+    /// Pagination cursor; absent on the last page.
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
+/// Normalized event used by the widget. All-day events still carry a UTC
+/// DateTime (midnight local), plus `all_day = true`.
 #[derive(Debug, Clone)]
 pub struct CalendarEvent {
     pub id: String,
@@ -60,9 +95,12 @@ pub struct CalendarEvent {
     pub all_day: bool,
     pub recurring_event_id: Option<String>,
     pub original_start_time: Option<DateTime<Utc>>,
+    /// Propagated from the master so that Undo can recreate a recurring event.
     pub recurrence: Option<Vec<String>>,
 }
 
+/// Serialized start/end for write operations. Untagged so the JSON shape
+/// matches Google's expected schema (either {dateTime, timeZone} or {date}).
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum EventDateTimeBody {
@@ -84,6 +122,8 @@ struct EventBody {
     end: EventDateTimeBody,
     #[serde(rename = "colorId", skip_serializing_if = "Option::is_none")]
     color_id: Option<String>,
+    /// Only sent on create of a recurring event; updates use PATCH with the
+    /// dedicated RecurrencePatchBody.
     #[serde(skip_serializing_if = "Option::is_none")]
     recurrence: Option<Vec<String>>,
 }
@@ -93,6 +133,11 @@ struct RecurrencePatchBody {
     recurrence: Vec<String>,
 }
 
+/// Converts a wire EventDateTime to (UTC DateTime, all_day).
+/// `earliest()` handles fall-back DST by picking the first of two identical
+/// local times. For the rare DST transition that skips midnight entirely
+/// (spring-forward at 00:00 local) we fall back to 01:00 local rather than
+/// discarding the event.
 fn parse_datetime(dt: &EventDateTime) -> Option<(DateTime<Utc>, bool)> {
     if let Some(s) = &dt.date_time {
         let d = DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&Utc);
@@ -101,7 +146,19 @@ fn parse_datetime(dt: &EventDateTime) -> Option<(DateTime<Utc>, bool)> {
     if let Some(s) = &dt.date {
         let nd = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
         let naive = nd.and_hms_opt(0, 0, 0)?;
-        let local = chrono::Local.from_local_datetime(&naive).earliest()?;
+        // Midnight may not exist during a DST transition in some timezones.
+        // Try midnight first, then 01:00, then 02:00 local.
+        let local = chrono::Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .or_else(|| {
+                let alt = naive + Duration::hours(1);
+                chrono::Local.from_local_datetime(&alt).earliest()
+            })
+            .or_else(|| {
+                let alt = naive + Duration::hours(2);
+                chrono::Local.from_local_datetime(&alt).earliest()
+            })?;
         return Some((local.with_timezone(&Utc), true));
     }
     None
@@ -130,12 +187,15 @@ fn convert(e: GoogleEvent) -> Option<CalendarEvent> {
     })
 }
 
+/// Serializes a start/end pair for the API, choosing the DATE variant for
+/// all-day events and DATE-TIME otherwise.
 fn datetime_body(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     all_day: bool,
 ) -> (EventDateTimeBody, EventDateTimeBody) {
     if all_day {
+        // Convert back to the local calendar date; the API expects YYYY-MM-DD.
         let s = start
             .with_timezone(&chrono::Local)
             .date_naive()
@@ -162,6 +222,22 @@ fn datetime_body(
     }
 }
 
+/// Extracts the UNTIL component of an RRULE, if present, as a full
+/// "UNTIL=..." string. Returning the raw string preserves the original
+/// formatting (DATE vs DATE-TIME), which is required by Google: all-day
+/// events need a DATE, timed events a UTC DATE-TIME.
+fn extract_until(rrule: &str) -> Option<String> {
+    rrule
+        .split(';')
+        .find(|p| p.starts_with("UNTIL="))
+        .map(|s| s.to_string())
+}
+
+/// Rewrites an RRULE adding/replacing UNTIL.
+///
+/// For timed events UNTIL must be a UTC DATE-TIME (`YYYYMMDDTHHMMSSZ`).
+/// For all-day events UNTIL must be a DATE (`YYYYMMDD`). Getting this wrong
+/// makes Google reject the request with HTTP 400.
 fn rrule_with_until(rrule: &str, until: DateTime<Utc>, all_day: bool) -> String {
     let parts: Vec<&str> = rrule.split(';').collect();
     let mut filtered: Vec<String> = parts
@@ -178,6 +254,9 @@ fn rrule_with_until(rrule: &str, until: DateTime<Utc>, all_day: bool) -> String 
     filtered.join(";")
 }
 
+/// Removes UNTIL from an RRULE. Used when splitting a series to create the
+/// "new" tail. Note that the caller must re-attach the *original* UNTIL (if
+/// any) so that a bounded series does not silently become infinite.
 fn rrule_without_until(rrule: &str) -> String {
     let parts: Vec<&str> = rrule.split(';').collect();
     let filtered: Vec<&str> = parts
@@ -187,6 +266,7 @@ fn rrule_without_until(rrule: &str) -> String {
     filtered.join(";")
 }
 
+/// Fetches a raw event by id (used to read the master of a recurring series).
 async fn get_event_raw(
     access_token: &str,
     calendar_id: &str,
@@ -211,6 +291,11 @@ async fn get_event_raw(
     Ok(resp.json().await?)
 }
 
+/// Fetches all events in [time_min, time_max), following pagination.
+///
+/// `singleEvents=true` makes the API expand recurring events into individual
+/// instances within the window, which is what the widget needs for rendering.
+/// `orderBy=startTime` requires singleEvents=true.
 pub async fn fetch_events(
     access_token: &str,
     calendar_id: &str,
@@ -223,29 +308,60 @@ pub async fn fetch_events(
         urlencoding::encode(calendar_id)
     );
 
-    let resp = http()
-        .get(&url)
-        .bearer_auth(access_token)
-        .query(&[
-            ("timeMin", time_min.to_rfc3339()),
-            ("timeMax", time_max.to_rfc3339()),
-            ("singleEvents", "true".to_string()),
-            ("orderBy", "startTime".to_string()),
-            ("maxResults", "2500".to_string()),
-        ])
-        .send()
-        .await?;
+    let mut all_events: Vec<CalendarEvent> = Vec::new();
+    let mut page_token: Option<String> = None;
+    let mut page_count: u32 = 0;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("API error {}: {}", status, body);
+    loop {
+        page_count += 1;
+        // Safety net: 20 pages * 2500 = 50k events. Enough for any real use.
+        if page_count > 20 {
+            crate::log::write("fetch_events: hit page limit (20), stopping");
+            break;
+        }
+
+        let mut query: Vec<(String, String)> = vec![
+            ("timeMin".to_string(), time_min.to_rfc3339()),
+            ("timeMax".to_string(), time_max.to_rfc3339()),
+            ("singleEvents".to_string(), "true".to_string()),
+            ("orderBy".to_string(), "startTime".to_string()),
+            ("maxResults".to_string(), "2500".to_string()),
+        ];
+        if let Some(t) = &page_token {
+            query.push(("pageToken".to_string(), t.clone()));
+        }
+
+        let resp = http()
+            .get(&url)
+            .bearer_auth(access_token)
+            .query(&query)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("API error {}: {}", status, body);
+        }
+
+        let body: EventsResponse = resp.json().await?;
+        if let Some(items) = body.items {
+            all_events.extend(items.into_iter().filter_map(convert));
+        }
+
+        match body.next_page_token {
+            Some(t) if !t.is_empty() => page_token = Some(t),
+            _ => break,
+        }
     }
 
-    let body: EventsResponse = resp.json().await?;
-    let items = body.items.unwrap_or_default();
-    let events = items.into_iter().filter_map(convert).collect();
-    Ok(events)
+    crate::log::write(&format!(
+        "fetch_events: {} events across {} page(s)",
+        all_events.len(),
+        page_count
+    ));
+
+    Ok(all_events)
 }
 
 pub async fn create_event(
@@ -286,6 +402,9 @@ pub async fn create_event(
     convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
+/// PATCH a single instance (or a non-recurring event). `recurrence` is
+/// intentionally omitted: patching RRULE requires a dedicated body and is not
+/// part of single-instance edits.
 pub async fn update_event(
     access_token: &str,
     calendar_id: &str,
@@ -325,6 +444,13 @@ pub async fn update_event(
     convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
+/// Updates the whole recurring series ("All events" scope).
+///
+/// The master's start is shifted by the same delta the user applied to the
+/// instance, so relative timing across the series is preserved. The master's
+/// duration is set to the duration the user currently has on the instance, so
+/// changes to the end time (or to the length) are applied to the whole series
+/// rather than being silently dropped.
 pub async fn update_event_all_occurrences(
     access_token: &str,
     calendar_id: &str,
@@ -340,17 +466,13 @@ pub async fn update_event_all_occurrences(
 
     let (base_start, _) = parse_datetime(&base.start)
         .ok_or_else(|| anyhow::anyhow!("Base event has no valid start"))?;
-    let base_end = base
-        .end
-        .as_ref()
-        .and_then(|edt| parse_datetime(edt).map(|(d, _)| d));
 
+    // delta = "how much later/earlier the user moved this instance"
     let delta = start - original_start;
     let new_master_start = base_start + delta;
-    let new_master_end = match base_end {
-        Some(e) => e + delta,
-        None => end,
-    };
+    // Use the *edited instance's* duration so end-time changes propagate.
+    let new_duration = end - start;
+    let new_master_end = new_master_start + new_duration;
 
     let url = format!(
         "{}/calendars/{}/events/{}",
@@ -381,6 +503,18 @@ pub async fn update_event_all_occurrences(
     convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
+/// Splits a recurring series at `original_start` ("This and following"):
+///   1. PATCH the master with UNTIL = original_start - 1s.
+///   2. POST a new master with the original RRULE (minus UNTIL) and the new
+///      start/end/summary.
+///
+/// If the original series was bounded by an UNTIL, the new tail must keep
+/// that same UNTIL so it remains bounded exactly like the original. Otherwise
+/// (e.g. `FREQ=WEEKLY;UNTIL=20261231T235959Z` split in June), the new series
+/// would silently become infinite.
+///
+/// If the instance is the first occurrence (base_start >= original_start),
+/// this degrades to a simple PATCH of the master.
 pub async fn update_event_this_and_following(
     access_token: &str,
     calendar_id: &str,
@@ -403,6 +537,7 @@ pub async fn update_event_this_and_following(
     let (base_start, _) = parse_datetime(&base.start)
         .ok_or_else(|| anyhow::anyhow!("Base event has no valid start"))?;
 
+    // Splitting at the very first occurrence means the whole series moves.
     if base_start >= original_start {
         return update_event(
             access_token,
@@ -417,9 +552,19 @@ pub async fn update_event_this_and_following(
         .await;
     }
 
+    // Cut just before the edited instance.
     let split_until = original_start - Duration::seconds(1);
     let truncated = rrule_with_until(&rrule, split_until, all_day);
-    let new_series_rrule = rrule_without_until(&rrule);
+
+    // Preserve the original UNTIL (if any) on the new series: a bounded
+    // series must remain bounded after a split, otherwise the tail would
+    // extend forever.
+    let original_until = extract_until(&rrule);
+    let base_rrule = rrule_without_until(&rrule);
+    let new_series_rrule = match original_until {
+        Some(until) => format!("{};{}", base_rrule, until),
+        None => base_rrule,
+    };
 
     let url_base = format!(
         "{}/calendars/{}/events/{}",
@@ -470,6 +615,8 @@ pub async fn update_event_this_and_following(
     convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
+/// Deletes "this and following". Only PATCHes the master with a truncated
+/// RRULE; if the split point is the first occurrence, deletes the whole series.
 pub async fn delete_event_this_and_following(
     access_token: &str,
     calendar_id: &str,

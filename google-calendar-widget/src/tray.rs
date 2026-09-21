@@ -1,3 +1,9 @@
+//! System tray icon and context menu (Show / Hide / Quit).
+//!
+//! tray-icon events are delivered through non-Send channels, so we don't
+//! subscribe to them directly in iced. Instead, `PollTray` (see messages.rs)
+//! periodically calls `try_recv` and translates events into Messages.
+
 use std::sync::OnceLock;
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
@@ -11,6 +17,7 @@ pub enum TrayMessage {
     Quit,
 }
 
+/// Ids are captured once at init and compared against incoming MenuEvents.
 struct TrayIds {
     show: MenuId,
     hide: MenuId,
@@ -48,13 +55,17 @@ pub fn init() {
         .build();
 
     if let Ok(tray) = tray {
+        // Leak the tray icon so it lives for the process lifetime. Dropping it
+        // would remove the icon from the notification area.
         std::mem::forget(tray);
     }
 
+    // Ensure the internal channels exist so try_recv doesn't panic later.
     let _ = TrayIconEvent::receiver();
     let _ = MenuEvent::receiver();
 }
 
+/// Builds a 32x32 solid blue icon.
 fn create_icon() -> tray_icon::Icon {
     let width: u32 = 32;
     let height: u32 = 32;

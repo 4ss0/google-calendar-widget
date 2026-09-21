@@ -1,3 +1,17 @@
+//! Business logic for user actions that require network I/O.
+//!
+//! Each `handle_*` method:
+//!   1. Validates the form state (early-returns with an error message on
+//!      invalid input).
+//!   2. Builds an async task that either refreshes the token (via
+//!      `run_with_token`) or performs the API call.
+//!   3. Returns a `Command` that will eventually produce a `*Completed`
+//!      message consumed by update.rs.
+//!
+//! `visible_range` computes the API time window for the current layout;
+//! `local_to_utc` handles the DST edge cases when converting naive local
+//! datetimes to UTC.
+
 use crate::app::{ApiResult, App, DragState, EditScope, FormMode};
 use crate::messages::Message;
 use crate::persistence;
@@ -6,6 +20,8 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use iced::Command;
 
 impl App {
+    /// Stores a refreshed token (and possibly a new refresh token) in memory
+    /// and on disk.
     pub fn apply_new_token(&mut self, new_token: Option<crate::config::StoredToken>) {
         if let Some(t) = new_token {
             self.access_token = Some(t.access_token.clone());
@@ -17,6 +33,20 @@ impl App {
         }
     }
 
+    /// Persists the current window geometry and theme. If the real on-screen
+    /// position is not yet known (first run, window still at the OS-chosen
+    /// default position), passes None so the saved file preserves the
+    /// "use OS default" flag instead of baking in a placeholder (0,0).
+    pub fn persist_geometry(&self) {
+        let pos = if self.window_position_known {
+            Some(self.window_position)
+        } else {
+            None
+        };
+        persistence::save_window_state(pos, self.window_size, self.theme.is_dark);
+    }
+
+    /// If the app was started with --minimized, restores the window.
     pub fn reveal_window(&mut self) -> Command<Message> {
         if self.started_minimized {
             self.started_minimized = false;
@@ -26,6 +56,7 @@ impl App {
         }
     }
 
+    /// Fetches events for the currently visible range using an existing token.
     pub fn fetch_command_now(
         &self,
         calendar_id: String,
@@ -59,6 +90,7 @@ impl App {
         )
     }
 
+    /// Convenience wrapper: refetches with the current token.
     pub fn refetch(&self) -> Command<Message> {
         let token = match &self.access_token {
             Some(t) => t.clone(),
@@ -68,6 +100,8 @@ impl App {
         self.fetch_command_now(calendar_id, token, self.expires_at)
     }
 
+    /// Save handler for both create and edit. Returns None (and sets
+    /// `self.last_error`) on invalid input.
     pub fn handle_save(&mut self) -> Option<Command<Message>> {
         let form = match &self.form {
             Some(f) => f.clone(),
@@ -98,6 +132,8 @@ impl App {
             }
         };
 
+        // Convert the (possibly all-day) form fields to UTC instants.
+        // All-day end is exclusive: Google expects the day AFTER the last day.
         let (start_utc, end_utc) = if form.all_day {
             let s_naive = start_date.and_hms_opt(0, 0, 0).unwrap();
             let e_naive = (end_date + Duration::days(1))
@@ -121,17 +157,22 @@ impl App {
             };
             let s_naive = start_date.and_time(start_time);
             let e_naive = end_date.and_time(end_time);
-            let s = match chrono::Local.from_local_datetime(&s_naive).single() {
+            // `.earliest()` picks the first of two identical local times on
+            // DST fall-back. Returns None only if the time doesn't exist at
+            // all (spring-forward gap), which is a genuine user error.
+            let s = match chrono::Local.from_local_datetime(&s_naive).earliest() {
                 Some(dt) => dt.with_timezone(&Utc),
                 None => {
-                    self.last_error = Some("Ambiguous start time".into());
+                    self.last_error =
+                        Some("Invalid start time (does not exist in local timezone)".into());
                     return None;
                 }
             };
-            let e = match chrono::Local.from_local_datetime(&e_naive).single() {
+            let e = match chrono::Local.from_local_datetime(&e_naive).earliest() {
                 Some(dt) => dt.with_timezone(&Utc),
                 None => {
-                    self.last_error = Some("Ambiguous end time".into());
+                    self.last_error =
+                        Some("Invalid end time (does not exist in local timezone)".into());
                     return None;
                 }
             };
@@ -143,6 +184,8 @@ impl App {
             return None;
         }
 
+        // RRULE is only built on create. Edits never touch the recurrence rule
+        // itself; if the user wants to change the rule they delete and re-create.
         let recurrence: Option<Vec<String>> =
             if matches!(form.mode, FormMode::Create) && form.recurring {
                 let interval = form
@@ -161,11 +204,31 @@ impl App {
                 if !until.is_empty() {
                     match chrono::NaiveDate::parse_from_str(until, "%Y-%m-%d") {
                         Ok(d) => {
+                            // The recurrence end must not be before the
+                            // event's own start date, otherwise the RRULE is
+                            // meaningless (Google rejects it with HTTP 400,
+                            // or produces an empty series).
+                            if d < start_date {
+                                self.last_error = Some(
+                                    "Recurrence end date must be on or after the event start date"
+                                        .into(),
+                                );
+                                return None;
+                            }
+                            // UNTIL format depends on whether DTSTART is a DATE
+                            // (all-day) or DATE-TIME (timed). For timed events
+                            // UNTIL must be a UTC instant: converting the local
+                            // end-of-day avoids off-by-one inclusion/exclusion
+                            // for non-UTC timezones.
                             if form.all_day {
                                 rrule.push_str(&format!(";UNTIL={}", d.format("%Y%m%d")));
                             } else {
-                                rrule
-                                    .push_str(&format!(";UNTIL={}T235959Z", d.format("%Y%m%d")));
+                                let local_end_naive = d.and_hms_opt(23, 59, 59).unwrap();
+                                let until_utc = local_to_utc(local_end_naive);
+                                rrule.push_str(&format!(
+                                    ";UNTIL={}",
+                                    until_utc.format("%Y%m%dT%H%M%SZ")
+                                ));
                             }
                         }
                         Err(_) => {
@@ -252,6 +315,7 @@ impl App {
                                 .await
                                 .map(|_| ())
                             } else {
+                                // OnlyThis or non-recurring: PATCH the instance.
                                 crate::api::client::update_event(
                                     &access,
                                     &calendar_id,
@@ -274,6 +338,7 @@ impl App {
         ))
     }
 
+    /// Delete handler. Scope determines which API call is used.
     pub fn handle_delete(&mut self) -> Option<Command<Message>> {
         let form = match &self.form {
             Some(f) => f.clone(),
@@ -334,11 +399,14 @@ impl App {
         ))
     }
 
+    /// Recreates the last deleted event (Undo banner). Propagates the original
+    /// recurrence so a deleted recurring series is restored as a series.
     pub fn handle_undo(&mut self) -> Option<Command<Message>> {
         let pending = self.pending_undo.take()?;
         let token = match &self.access_token {
             Some(t) => t.clone(),
             None => {
+                // Put the undo back so the banner doesn't vanish silently.
                 self.pending_undo = Some(pending);
                 return None;
             }
@@ -393,6 +461,13 @@ impl App {
         ))
     }
 
+    /// Drag & drop: shift the event by whole days. Recurring instances are
+    /// moved individually (they get a new id server-side but the series link
+    /// is preserved by Google).
+    ///
+    /// The shift is performed in *local* time to preserve the wall-clock time
+    /// across DST transitions: adding days to a UTC timestamp would otherwise
+    /// shift the local time by one hour when crossing a DST boundary.
     pub fn handle_move_event(
         &mut self,
         drag: DragState,
@@ -423,11 +498,13 @@ impl App {
         let summary = event.summary.clone();
         let color_id = event.color_id.clone();
         let all_day = event.all_day;
-        let new_start = event.start + Duration::days(delta_days);
-        let new_end = event
-            .end
-            .unwrap_or(event.start + Duration::hours(1))
-            + Duration::days(delta_days);
+
+        // Shift start/end by calendar days while preserving local time-of-day.
+        let new_start = shift_utc_by_local_days(event.start, delta_days);
+        let new_end = shift_utc_by_local_days(
+            event.end.unwrap_or(event.start + Duration::hours(1)),
+            delta_days,
+        );
 
         Some(Command::perform(
             run_with_token(
@@ -457,6 +534,9 @@ impl App {
     }
 }
 
+/// Ensures the token is fresh (via persistence::ensure_token), then runs `f`
+/// with the access token. Any refresh that happened is reported back in the
+/// ApiResult so the caller can persist the new refresh token.
 async fn run_with_token<F, Fut, T>(
     client_id: String,
     client_secret: String,
@@ -490,13 +570,56 @@ where
     ApiResult { new_token, result }
 }
 
+/// Converts a naive local datetime to UTC.
+///
+/// `earliest()` resolves DST fall-back ambiguity (two identical local times
+/// on the same night). For spring-forward gaps (the local time does not exist
+/// at all) the function advances by hours until it finds a valid local time,
+/// instead of falling back to UTC which would move the event by the full
+/// timezone offset.
 fn local_to_utc(naive: chrono::NaiveDateTime) -> DateTime<Utc> {
-    match chrono::Local.from_local_datetime(&naive).earliest() {
-        Some(dt) => dt.with_timezone(&Utc),
-        None => Utc.from_utc_datetime(&naive),
+    if let Some(dt) = chrono::Local.from_local_datetime(&naive).earliest() {
+        return dt.with_timezone(&Utc);
+    }
+    // DST spring-forward gap: try successive hours until a valid local time
+    // is found. The gap is at most 1-2 hours in practice.
+    for h in 1..=3 {
+        let candidate = naive + Duration::hours(h);
+        if let Some(dt) = chrono::Local.from_local_datetime(&candidate).earliest() {
+            return dt.with_timezone(&Utc);
+        }
+    }
+    // Last-resort fallback (should not happen in practice).
+    Utc.from_utc_datetime(&naive)
+}
+
+/// Shifts a UTC datetime by a number of *calendar* days, preserving the local
+/// time-of-day. This is essential for drag & drop across DST boundaries: adding
+/// 24-hour days to a UTC instant would change the local wall-clock time.
+///
+/// For all-day events (which are stored at local midnight) this correctly
+/// moves the event to the new local date without shifting the time.
+fn shift_utc_by_local_days(dt: DateTime<Utc>, days: i64) -> DateTime<Utc> {
+    let local = dt.with_timezone(&chrono::Local);
+    let naive = local.naive_local();
+    let new_date = naive.date() + Duration::days(days);
+    let new_naive = new_date.and_time(naive.time());
+
+    match chrono::Local.from_local_datetime(&new_naive).earliest() {
+        Some(new_local) => new_local.with_timezone(&Utc),
+        None => {
+            // DST gap: the requested local time does not exist (e.g. 02:30 on
+            // the spring-forward night). Fall back to adding the days in UTC,
+            // which is the previous behavior. A more sophisticated approach
+            // would shift to the next valid local time, but this edge case is
+            // extremely uncommon.
+            dt + Duration::days(days)
+        }
     }
 }
 
+/// Computes the API fetch window for the current layout. Always starts/ends at
+/// local midnight so DST transitions don't shift the boundaries.
 fn visible_range(
     selected: chrono::NaiveDate,
     layout: ui::Layout,

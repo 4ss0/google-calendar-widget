@@ -1,3 +1,9 @@
+//! Autostart via the current-user Run registry key:
+//!   HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+//!
+//! The value is a command line pointing to the current .exe with the
+//! `--minimized` flag. `heal_autostart` rewrites the value if the exe moved.
+
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use windows::core::PCWSTR;
@@ -11,10 +17,13 @@ use windows::Win32::System::Registry::{
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE_NAME: &str = "GoogleCalendarWidget";
 
+/// Encodes a Rust str as a null-terminated UTF-16 wide string for Win32.
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// Builds the command line written into the Run value:
+///     "<path-to-exe>" --minimized
 fn exe_command() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_str = exe.to_string_lossy().to_string();
@@ -57,6 +66,7 @@ pub fn is_autostart_enabled() -> bool {
             Some(&mut size),
         );
         let _ = RegCloseKey(hkey);
+        // size > 2 means at least one character plus the null terminator.
         result.0 == 0 && size > 2
     }
 }
@@ -82,6 +92,7 @@ pub fn enable_autostart() -> Result<(), String> {
         ))
         .map_err(|e| format!("RegCreateKeyExW: {}", e))?;
 
+        // REG_SZ payload is raw bytes of the UTF-16 string, including the null.
         let bytes = std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2);
         let set = RegSetValueExW(
             hkey,
@@ -109,6 +120,7 @@ pub fn disable_autostart() -> Result<(), String> {
             KEY_WRITE,
             &mut hkey,
         );
+        // Key missing => autostart is already disabled.
         if open.0 != 0 {
             return Ok(());
         }
@@ -120,6 +132,8 @@ pub fn disable_autostart() -> Result<(), String> {
     Ok(())
 }
 
+/// Rewrites the Run value to the current exe path if autostart is enabled.
+/// Called at startup so moving/renaming the .exe doesn't break autostart.
 pub fn heal_autostart() {
     if is_autostart_enabled() {
         let _ = enable_autostart();

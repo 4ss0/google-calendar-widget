@@ -1,3 +1,13 @@
+//! DPAPI wrapper for encrypting sensitive files (config, refresh token).
+//!
+//! Uses CryptProtectData / CryptUnprotectData from the Windows Data Protection
+//! API. Protection is scoped to the current Windows user account: the ciphertext
+//! cannot be decrypted by another user or on another machine.
+//!
+//! A constant entropy blob is passed in so that even if the file is copied to
+//! another machine and re-protected by the same user, it won't decrypt (extra
+//! hardening against accidental migration).
+
 use std::path::Path;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
@@ -5,8 +15,11 @@ use windows::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
 };
 
+/// Application-specific entropy mixed into DPAPI. Changing this invalidates
+/// all previously saved blobs.
 const ENTROPY: &[u8] = b"gcal-widget-v1";
 
+/// Wraps a Rust slice as a Win32 CRYPT_INTEGER_BLOB (borrowed pointer).
 fn blob_from_slice(data: &[u8]) -> CRYPT_INTEGER_BLOB {
     CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
@@ -27,6 +40,7 @@ pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         let entropy_blob = blob_from_slice(ENTROPY);
         let mut out_blob = empty_blob();
 
+        // CRYPTPROTECT_UI_FORBIDDEN: never show a UI prompt; fail instead.
         CryptProtectData(
             &in_blob,
             PCWSTR::null(),
@@ -42,6 +56,7 @@ pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
             anyhow::bail!("CryptProtectData returned empty blob");
         }
 
+        // Copy the unmanaged buffer into a Rust Vec before freeing.
         let result =
             std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
         let _ = LocalFree(HLOCAL(out_blob.pbData as *mut _));
@@ -54,6 +69,7 @@ pub fn unprotect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         let in_blob = blob_from_slice(data);
         let entropy_blob = blob_from_slice(ENTROPY);
         let mut out_blob = empty_blob();
+        // Optional description string; we free it below if non-null.
         let mut descr = PWSTR::null();
 
         CryptUnprotectData(

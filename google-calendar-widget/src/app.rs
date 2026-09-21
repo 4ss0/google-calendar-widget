@@ -1,3 +1,10 @@
+//! Application state and pure data types shared across the update/view layers.
+//!
+//! The `App` struct holds everything: config, theme, current state machine
+//! variant, loaded events (`EventIndex`), form state, drag state, etc.
+//! `EventIndex` precomputes a date -> event index for O(1) lookups in the
+//! views, which would otherwise be O(n) per rendered day.
+
 use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
 use crate::config::{AppConfig, StoredToken};
@@ -9,6 +16,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub enum FormMode {
     Create,
+    /// Edit an existing event by its instance id.
     Edit(String),
 }
 
@@ -39,6 +47,7 @@ impl RecurFreq {
         }
     }
 
+    /// iCalendar FREQ token used in the RRULE sent to Google.
     pub fn rrule_name(&self) -> &'static str {
         match self {
             RecurFreq::Daily => "DAILY",
@@ -49,6 +58,10 @@ impl RecurFreq {
     }
 }
 
+/// Which occurrences an edit/delete applies to.
+/// - OnlyThis: PATCH/DELETE the single instance.
+/// - All: PATCH/DELETE the master (RRULE applies to every occurrence).
+/// - ThisAndFollowing: truncate the master with UNTIL and create a new series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditScope {
     OnlyThis,
@@ -74,6 +87,8 @@ impl EditScope {
     }
 }
 
+/// In-memory state of the create/edit form. Dates/times are kept as strings
+/// so the user can type freely; parsing happens in handlers::handle_save.
 #[derive(Debug, Clone)]
 pub struct EventForm {
     pub mode: FormMode,
@@ -88,11 +103,19 @@ pub struct EventForm {
     pub recur_freq: RecurFreq,
     pub recur_interval: String,
     pub recur_until: String,
+    /// Set for instances of a recurring series.
     pub recurring_event_id: Option<String>,
+    /// Original start of the instance being edited (needed for split logic).
     pub original_start: Option<DateTime<Utc>>,
     pub edit_scope: EditScope,
     pub confirm_delete: bool,
+    /// True while the "empty title" confirmation prompt is shown to the user.
     pub confirm_empty_title: bool,
+    /// True only after the user explicitly answered "Yes, save" to the empty
+    /// title prompt. Reset whenever the title is edited. Distinct from
+    /// `confirm_empty_title` so that clicking the main Save button twice
+    /// cannot bypass the confirmation.
+    pub empty_title_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,15 +126,18 @@ pub struct SetupForm {
     pub error: Option<String>,
 }
 
+/// Result wrapper for async tasks that may have rotated the token.
 #[derive(Debug, Clone)]
 pub struct ApiResult<T> {
     pub new_token: Option<StoredToken>,
     pub result: Result<T, String>,
 }
 
+/// Snapshot of a deleted event, used to restore it via the Undo banner.
 #[derive(Debug, Clone)]
 pub struct PendingUndo {
     pub event: CalendarEvent,
+    /// Monotonic id so a stale UndoExpired timer doesn't dismiss a newer undo.
     pub nonce: u64,
 }
 
@@ -119,10 +145,16 @@ pub struct PendingUndo {
 pub struct DragState {
     pub event: CalendarEvent,
     pub source_date: NaiveDate,
+    /// Cursor position at the moment of the press, used to detect a real drag.
     pub press_pos: Point,
+    /// Becomes true once the cursor moves past a threshold.
     pub moved: bool,
 }
 
+/// Precomputed index: maps a date to the list of events occurring that day.
+/// Timed events are indexed only on the local date of their start; all-day
+/// events span from start_date to end_date-1 (Google's all-day end is
+/// exclusive).
 #[derive(Debug)]
 pub struct EventIndex {
     pub events: Vec<CalendarEvent>,
@@ -140,6 +172,8 @@ impl EventIndex {
                 Some(end) => {
                     let end_local = end.with_timezone(&chrono::Local);
                     let d = end_local.date_naive();
+                    // Google's all-day end is exclusive: subtract one day if the
+                    // event spans multiple days, otherwise keep the same day.
                     if e.all_day && d > start_date {
                         d.pred_opt().unwrap_or(d)
                     } else {
@@ -149,6 +183,7 @@ impl EventIndex {
                 None => start_date,
             };
 
+            // Iterate inclusively from start_date to end_date.
             let mut d = start_date;
             loop {
                 by_date.entry(d).or_default().push(i);
@@ -162,6 +197,7 @@ impl EventIndex {
             }
         }
 
+        // Sort each day's events: all-day first, then timed by start time.
         for idxs in by_date.values_mut() {
             idxs.sort_by(|&a, &b| {
                 let ea = &events[a];
@@ -180,6 +216,9 @@ impl EventIndex {
         self.for_date_filtered(date, None)
     }
 
+    /// Returns events occurring on `date`, optionally filtered by a case-
+    /// insensitive summary query. The query is trimmed; empty queries are
+    /// treated as "no filter".
     pub fn for_date_filtered(
         &self,
         date: NaiveDate,
@@ -204,12 +243,17 @@ impl EventIndex {
 }
 
 pub enum AppState {
+    /// First run: user must enter OAuth credentials.
     Setup,
+    /// Credentials known but no valid refresh token: full OAuth in progress.
     WaitingAuth,
+    /// Token available: fetching events.
     Loading,
+    /// Events loaded: main calendar view.
     Ready {
         index: EventIndex,
     },
+    /// Any fatal error; UI shows Retry / Re-authenticate / Configure.
     Error(String),
 }
 
@@ -218,15 +262,25 @@ pub struct App {
     pub palette: ColorPalette,
     pub theme: AppTheme,
     pub state: AppState,
+    /// Saved when the user opens the setup wizard from an existing session,
+    /// so Cancel can restore the previous screen.
     pub state_before_setup: Option<AppState>,
     pub setup_form: SetupForm,
     pub selected: NaiveDate,
     pub window_size: Size,
     pub window_position: Point,
+    /// True once the real on-screen position of the window is known (loaded
+    /// from disk or received via a WindowMoved event). Until then we must not
+    /// persist the placeholder (0,0) into the saved state, otherwise the next
+    /// launch would pin the window to the top-left corner of the screen.
+    pub window_position_known: bool,
     pub last_cursor: Point,
     pub resize_start: Option<(f32, f32, Size)>,
+    /// True while a debounced window-state save is pending.
     pub pending_window_save: bool,
+    /// Alpha for the app background (container fill).
     pub bg_alpha: f32,
+    /// Alpha for the whole window (SetLayeredWindowAttributes).
     pub window_alpha: f32,
     pub autostart_enabled: bool,
     pub started_minimized: bool,
@@ -241,6 +295,8 @@ pub struct App {
     pub last_error: Option<String>,
     pub pending_undo: Option<PendingUndo>,
     pub next_undo_nonce: u64,
+    /// Snapshot of the event being edited, used to populate the undo banner
+    /// after deletion.
     pub form_source_event: Option<CalendarEvent>,
     pub search_query: String,
     pub drag: Option<DragState>,
@@ -254,6 +310,7 @@ impl App {
     }
 }
 
+// Tests: exercise the EventIndex date bucketing, sorting and search filter.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,3 +1,14 @@
+//! Event create/edit form.
+//!
+//! Renders different fields depending on the mode:
+//!   - Create: title, date range, optional time, color, all-day toggle,
+//!     recurrence toggle (frequency / interval / optional until).
+//!   - Edit: same but recurrence is disabled; instead, when editing an
+//!     instance of a recurring event, a scope selector (Only this / All /
+//!     This and following) is shown. Delete goes through a two-step
+//!     confirmation which, for recurring instances, also lets the user pick
+//!     the delete scope.
+
 use crate::api::colors::ColorPalette;
 use crate::app::{EditScope, EventForm, FormMode, RecurFreq};
 use crate::messages::Message;
@@ -7,6 +18,7 @@ use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{button, checkbox, column, container, mouse_area, row, text, text_input};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
+/// Small selectable pill used for recurrence frequency and edit/delete scope.
 fn pill<'a>(
     label: &'a str,
     selected: bool,
@@ -73,6 +85,7 @@ pub fn view_form<'a>(
         .into();
     let row2b: Element<Message> = row(vec![all_day_box]).spacing(8).into();
 
+    // Time inputs are hidden for all-day events.
     let row3: Element<Message> = if form.all_day {
         row(vec![]).spacing(0).into()
     } else {
@@ -93,6 +106,9 @@ pub fn view_form<'a>(
 
     let color_label: Element<Message> = text("Color:").style(t).into();
 
+    // Color swatches, sorted numerically by id ("1".."11"). Sizes and
+    // spacing are kept small so the whole row fits in the minimum window
+    // width (360px) without overflow.
     let mut sorted_ids: Vec<String> = palette.event_colors.keys().cloned().collect();
     sorted_ids.sort_by_key(|s| s.parse::<u32>().unwrap_or(0));
 
@@ -104,19 +120,20 @@ pub fn view_form<'a>(
             .and_then(parse_hex_color)
             .unwrap_or(Color::from_rgb(0.8, 0.8, 0.8));
         let is_selected = form.color_id == *id;
+        // Selected swatch gets a thicker, dark border.
         let border_color = if is_selected { theme.text } else { Color::TRANSPARENT };
         let border_width = if is_selected { 2.0 } else { 1.0 };
 
         let swatch_inner: Element<Message> = container(text(""))
-            .width(Length::Fixed(22.0))
-            .height(Length::Fixed(22.0))
+            .width(Length::Fixed(14.0))
+            .height(Length::Fixed(14.0))
             .style(move |_theme: &Theme| ContainerAppearance {
                 text_color: None,
                 background: Some(Background::Color(bg)),
                 border: Border {
                     color: border_color,
                     width: border_width,
-                    radius: 4.0.into(),
+                    radius: 3.0.into(),
                 },
                 shadow: Default::default(),
             })
@@ -130,13 +147,14 @@ pub fn view_form<'a>(
         color_row_items.push(swatch);
     }
 
+    // "X" clears the color (falls back to default gray in the renderer).
     let clear_btn: Element<Message> = button(text("X").size(11))
         .on_press(Message::FormColorChanged(String::new()))
-        .padding([2, 6])
+        .padding([2, 5])
         .into();
     color_row_items.push(clear_btn);
 
-    let row4: Element<Message> = row(color_row_items).spacing(6).into();
+    let row4: Element<Message> = row(color_row_items).spacing(4).into();
 
     let save_btn: Element<Message> = if saving {
         button(text("Saving...").size(13)).into()
@@ -152,6 +170,7 @@ pub fn view_form<'a>(
 
     let mut actions: Vec<Element<Message>> = vec![save_btn, cancel_btn];
 
+    // Delete is only available in edit mode and until the user confirms it.
     if matches!(form.mode, FormMode::Edit(_)) && !form.confirm_delete {
         if saving {
             actions.push(text("Operation in progress...").size(13).style(t).into());
@@ -167,6 +186,8 @@ pub fn view_form<'a>(
 
     let mut rows: Vec<Element<Message>> = Vec::new();
 
+    // Scope selector: shown for instances of a recurring series while editing
+    // (not while confirming a deletion, which has its own scope row below).
     if is_recurring_instance && !form.confirm_delete {
         let surface_alt = theme.surface_alt;
         let border_light = theme.border_light;
@@ -207,6 +228,7 @@ pub fn view_form<'a>(
     }
     rows.push(row4);
 
+    // Recurrence controls are only available when creating a new event.
     if is_create {
         let recur_box: Element<Message> = checkbox("Recurring", form.recurring)
             .on_toggle(Message::FormRecurringToggled)
@@ -249,6 +271,7 @@ pub fn view_form<'a>(
         }
     }
 
+    // Confirmation prompt when the user tries to save an event with no title.
     if form.confirm_empty_title && !saving {
         let warn: Element<Message> =
             text("Title is empty. Save anyway?").size(13).style(t).into();
@@ -261,6 +284,7 @@ pub fn view_form<'a>(
         rows.push(row(vec![warn, yes, no]).spacing(8).into());
     }
 
+    // Delete confirmation: for recurring instances, offers the scope selector.
     if form.confirm_delete && !saving {
         let surface_alt = theme.surface_alt;
         let border_light = theme.border_light;
@@ -323,6 +347,7 @@ pub fn view_form<'a>(
     let border = theme.form_border;
     let text_color = theme.text;
 
+    // Whole form sits in a rounded card.
     container(column(rows).spacing(8))
         .padding(10)
         .style(move |_theme: &Theme| ContainerAppearance {

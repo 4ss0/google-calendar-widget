@@ -1,6 +1,22 @@
+//! Elm-style update function: maps each Message to a state transition and,
+//! optionally, a Command (async side effect).
+//!
+//! The state machine is a flat match on the Message variant. Anything that
+//! touches the disk, network, or Win32 APIs is dispatched as a Command so the
+//! UI thread never blocks.
+//!
+//! Several invariants matter here:
+//!   - `started_minimized`: initial startup must hide the window after the
+//!     first frame, but only if the window hasn't already been revealed by
+//!     the first successful fetch.
+//!   - `pending_window_save`: debounces geometry writes during live resizes.
+//!   - `pending_undo`: uses a monotonic nonce so a stale UndoExpired timer
+//!     can't dismiss a fresh undo.
+//!   - The KeepAtBottom tick is a no-op while the widget is focused, to avoid
+//!     flicker while the user interacts with it.
+
 use crate::app::{App, AppState, DragState, EditScope, EventIndex, FormMode, PendingUndo, RecurFreq};
 use crate::messages::Message;
-use crate::persistence;
 use crate::tray;
 use crate::ui::AppTheme;
 use chrono::Duration;
@@ -10,8 +26,12 @@ use tray_icon::TrayIconEvent;
 
 const MIN_WINDOW_ALPHA: f32 = 0.55;
 const UNDO_WINDOW_SECS: u64 = 8;
+/// Squared distance (in pixels^2) after which a press becomes a drag.
 const DRAG_THRESHOLD_SQ: f32 = 36.0;
 
+/// Reapplies Win32 window effects at several delays after a visibility change,
+/// because some effects (taskbar tab, alpha) can be overwritten by the OS
+/// during the transition.
 fn schedule_win_effects() -> Command<Message> {
     Command::batch(vec![
         Command::perform(
@@ -47,6 +67,7 @@ fn apply_win_effects(alpha: f32) {
 }
 
 impl App {
+    /// Shows the window and reapplies the desktop-widget effects.
     pub fn show_window_with_effects() -> Command<Message> {
         let show = iced::window::change_mode(
             iced::window::Id::MAIN,
@@ -58,6 +79,11 @@ impl App {
     pub fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::WindowResized(size) => {
+                // A (0,0) resize means the OS minimized the window to the
+                // tray (or similar). Restore it and return immediately:
+                // treating (0,0) as a real size would corrupt the layout
+                // (width 0 => Day view) and could persist a zero-sized
+                // window to disk on the next debounced save.
                 if size.width == 0.0 && size.height == 0.0 {
                     #[cfg(target_os = "windows")]
                     if let Some(hwnd) =
@@ -65,8 +91,10 @@ impl App {
                     {
                         crate::platform::windows::restore_window(hwnd);
                     }
+                    return Command::none();
                 }
                 self.window_size = size;
+                // Menu is only used in narrow layout.
                 if size.width >= 800.0 {
                     self.menu_open = false;
                 }
@@ -74,20 +102,21 @@ impl App {
             }
             Message::WindowMoved(pos) => {
                 self.window_position = pos;
+                // From this point on we know the real position, so we can
+                // safely persist it (and later restore it by pixel).
+                self.window_position_known = true;
                 self.schedule_window_save()
             }
             Message::FlushWindowState => {
                 if self.pending_window_save {
                     self.pending_window_save = false;
-                    persistence::save_window_state(
-                        self.window_position,
-                        self.window_size,
-                        self.theme.is_dark,
-                    );
+                    self.persist_geometry();
                 }
                 Command::none()
             }
             Message::WindowFocused => {
+                // Refetch on focus, but throttled to once per 3 seconds to
+                // avoid hammering the API when the user alt-tabs quickly.
                 if !matches!(self.state, AppState::Ready { .. }) {
                     return Command::none();
                 }
@@ -104,6 +133,8 @@ impl App {
             }
             Message::CursorMoved(pos) => {
                 self.last_cursor = pos;
+                // Promote a pending press to a drag once the cursor has moved
+                // far enough. Below the threshold it's treated as a click.
                 if let Some(d) = &mut self.drag {
                     if !d.moved {
                         let dx = pos.x - d.press_pos.x;
@@ -113,6 +144,7 @@ impl App {
                         }
                     }
                 }
+                // Bottom-right resize handle: adjust window size directly.
                 if let Some((sx, sy, start_size)) = self.resize_start {
                     let dw = pos.x - sx;
                     let dh = pos.y - sy;
@@ -131,16 +163,15 @@ impl App {
             Message::GlobalLeftUp => {
                 let mut cmds: Vec<Command<Message>> = Vec::new();
 
+                // Finish a resize, if any, and persist geometry immediately.
                 if self.resize_start.is_some() {
                     self.resize_start = None;
                     self.pending_window_save = false;
-                    persistence::save_window_state(
-                        self.window_position,
-                        self.window_size,
-                        self.theme.is_dark,
-                    );
+                    self.persist_geometry();
                 }
 
+                // Terminate a drag: either commit a move or open the edit form
+                // (if the press never moved past the threshold = it was a click).
                 if let Some(drag) = self.drag.take() {
                     let target = self.hover_date.take();
                     if drag.moved {
@@ -174,11 +205,7 @@ impl App {
                 } else {
                     AppTheme::dark()
                 };
-                persistence::save_window_state(
-                    self.window_position,
-                    self.window_size,
-                    self.theme.is_dark,
-                );
+                self.persist_geometry();
                 Command::none()
             }
             Message::IncreaseTransparency => {
@@ -223,6 +250,8 @@ impl App {
                 Command::none()
             }
             Message::ApplyWindowEffects => {
+                // The HWND is now available: install the WndProc hook, then
+                // (optionally) start the hide timer if launched minimized.
                 #[cfg(target_os = "windows")]
                 if let Some(hwnd) =
                     crate::platform::windows::find_hwnd("Google Calendar Widget")
@@ -247,6 +276,14 @@ impl App {
                 Command::none()
             }
             Message::HideOnStartup => {
+                // If the window has already been revealed (typically because
+                // the initial fetch completed before this timer fired), do
+                // nothing: `reveal_window` cleared `started_minimized`, and
+                // hiding now would contradict the widget's intended behavior
+                // of staying visible on the desktop.
+                if !self.started_minimized {
+                    return Command::none();
+                }
                 iced::window::change_mode(
                     iced::window::Id::MAIN,
                     iced::window::Mode::Hidden,
@@ -255,6 +292,9 @@ impl App {
             Message::KeepAtBottom => {
                 #[cfg(target_os = "windows")]
                 if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
+                    // Do nothing while the user is actively interacting with
+                    // the widget: any z-order change here would steal focus
+                    // and cause a flicker.
                     if crate::platform::windows::is_window_foreground(hwnd) {
                         return Command::none();
                     }
@@ -275,6 +315,7 @@ impl App {
                 Command::none()
             }
             Message::TokenPolled(Ok(token)) => {
+                // Persist a rotated refresh token, then kick off the first fetch.
                 if let Some(rt) = &token.refresh_token {
                     let _ = crate::auth::oauth::save_refresh_token(rt);
                     self.refresh_token = Some(rt.clone());
@@ -330,6 +371,7 @@ impl App {
                 self.refetch()
             }
             Message::OpenCreateForm => {
+                // Prefill with "now" for convenience.
                 let now = chrono::Local::now();
                 let date = self.selected.format("%Y-%m-%d").to_string();
                 let start = now.format("%H:%M").to_string();
@@ -352,6 +394,7 @@ impl App {
                     edit_scope: EditScope::OnlyThis,
                     confirm_delete: false,
                     confirm_empty_title: false,
+                    empty_title_confirmed: false,
                 });
                 self.saving = false;
                 self.last_error = None;
@@ -359,6 +402,8 @@ impl App {
                 Command::none()
             }
             Message::OpenCreateFormForDate(date) => {
+                // If the user clicked today, prefill with "now". For other
+                // days, prefill 09:00-10:00 which is what most users want.
                 let today = chrono::Local::now().date_naive();
                 let (start, end) = if date == today {
                     let now = chrono::Local::now();
@@ -388,6 +433,7 @@ impl App {
                     edit_scope: EditScope::OnlyThis,
                     confirm_delete: false,
                     confirm_empty_title: false,
+                    empty_title_confirmed: false,
                 });
                 self.saving = false;
                 self.last_error = None;
@@ -405,6 +451,8 @@ impl App {
                     .unwrap_or(event.start + chrono::Duration::hours(1))
                     .with_timezone(&chrono::Local);
 
+                // For all-day events the API's end is exclusive: convert back
+                // to an inclusive end date for the form.
                 let (date_s, end_date_s, time_s, time_e) = if event.all_day {
                     let sd = start_local.date_naive();
                     let ed = end_local.date_naive();
@@ -446,6 +494,7 @@ impl App {
                     edit_scope: EditScope::OnlyThis,
                     confirm_delete: false,
                     confirm_empty_title: false,
+                    empty_title_confirmed: false,
                 });
                 self.saving = false;
                 self.last_error = None;
@@ -453,6 +502,7 @@ impl App {
                 Command::none()
             }
             Message::CloseForm => {
+                // Ignore close while an API call is in flight.
                 if self.saving {
                     return Command::none();
                 }
@@ -464,13 +514,17 @@ impl App {
             Message::FormTitleChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.title = s;
+                    // Any edit resets both the prompt and the explicit
+                    // confirmation: the user must decide again.
                     f.confirm_empty_title = false;
+                    f.empty_title_confirmed = false;
                 }
                 Command::none()
             }
             Message::FormDateChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.date = s.clone();
+                    // Keep the end date >= start date.
                     if f.end_date.is_empty() || f.end_date < s {
                         f.end_date = s;
                     }
@@ -538,8 +592,11 @@ impl App {
                 Command::none()
             }
             Message::ConfirmEmptyTitle => {
+                // The user explicitly answered "Yes, save" to the empty
+                // title prompt. Record the confirmation and retry the save.
                 if let Some(f) = &mut self.form {
-                    f.confirm_empty_title = true;
+                    f.empty_title_confirmed = true;
+                    f.confirm_empty_title = false;
                 }
                 self.update(Message::SaveEvent)
             }
@@ -553,10 +610,14 @@ impl App {
                 if self.saving {
                     return Command::none();
                 }
+                // First Save with an empty title shows a confirmation row
+                // instead of proceeding. `empty_title_confirmed` is set only
+                // by the "Yes, save" button, so clicking Save twice cannot
+                // bypass the prompt.
                 let needs_confirm = self
                     .form
                     .as_ref()
-                    .map(|f| f.title.trim().is_empty() && !f.confirm_empty_title)
+                    .map(|f| f.title.trim().is_empty() && !f.empty_title_confirmed)
                     .unwrap_or(false);
                 if needs_confirm {
                     if let Some(f) = &mut self.form {
@@ -622,13 +683,14 @@ impl App {
                     Ok(()) => {
                         let mut cmds: Vec<Command<Message>> = vec![self.refetch()];
 
+                        // The undo banner is offered only for non-recurring
+                        // events. Recreating a deleted instance of a series
+                        // would produce a standalone event, not restore the
+                        // original exception in the series, so we skip it.
                         let undoable = self
                             .form
                             .as_ref()
-                            .map(|f| {
-                                let is_rec = f.recurring_event_id.is_some();
-                                !is_rec || f.edit_scope == EditScope::OnlyThis
-                            })
+                            .map(|f| f.recurring_event_id.is_none())
                             .unwrap_or(false);
 
                         if undoable {
@@ -636,6 +698,7 @@ impl App {
                                 let nonce = self.next_undo_nonce;
                                 self.next_undo_nonce += 1;
                                 self.pending_undo = Some(PendingUndo { event: ev, nonce });
+                                // Auto-dismiss timer.
                                 cmds.push(Command::perform(
                                     async move {
                                         tokio::time::sleep(std::time::Duration::from_secs(
@@ -674,6 +737,7 @@ impl App {
                 }
             }
             Message::UndoExpired(nonce) => {
+                // Only dismiss if the pending undo hasn't been replaced.
                 if let Some(p) = &self.pending_undo {
                     if p.nonce == nonce {
                         self.pending_undo = None;
@@ -709,6 +773,8 @@ impl App {
                 Command::none()
             }
             Message::EventMouseDown { event, source_date } => {
+                // Register a potential drag; it becomes a real drag only if
+                // the cursor moves past DRAG_THRESHOLD (see CursorMoved).
                 self.drag = Some(DragState {
                     event,
                     source_date,
@@ -738,14 +804,11 @@ impl App {
             Message::StartDrag => iced::window::drag(iced::window::Id::MAIN),
             Message::CloseWindow => {
                 self.pending_window_save = false;
-                persistence::save_window_state(
-                    self.window_position,
-                    self.window_size,
-                    self.theme.is_dark,
-                );
+                self.persist_geometry();
                 iced::window::close(iced::window::Id::MAIN)
             }
             Message::Reauthenticate => {
+                // Clear local tokens and restart the full OAuth flow.
                 crate::auth::oauth::delete_refresh_token();
                 self.access_token = None;
                 self.refresh_token = None;
@@ -800,6 +863,7 @@ impl App {
                 }
             }
             Message::AutoRetryTick => {
+                // Only acts in Error state and when no retry is in flight.
                 if !matches!(self.state, AppState::Error(_)) {
                     return Command::none();
                 }
@@ -834,6 +898,8 @@ impl App {
                 Command::none()
             }
             Message::PollTray => {
+                // tray-icon receivers are not Send, so we poll them.
+                // A click on the tray icon (not the menu) also shows the window.
                 if TrayIconEvent::receiver().try_recv().is_ok() {
                     return Self::show_window_with_effects();
                 }
@@ -852,11 +918,7 @@ impl App {
                 ),
                 crate::tray::TrayMessage::Quit => {
                     self.pending_window_save = false;
-                    persistence::save_window_state(
-                        self.window_position,
-                        self.window_size,
-                        self.theme.is_dark,
-                    );
+                    self.persist_geometry();
                     iced::window::close(iced::window::Id::MAIN)
                 }
             },
@@ -901,6 +963,8 @@ impl App {
                         self.setup_form.error = None;
                         self.refresh_token = None;
 
+                        // Force a fresh OAuth flow: the previous token (if any)
+                        // belongs to a different Google app.
                         crate::auth::oauth::delete_refresh_token();
 
                         let client_id = self.config.client_id.clone();
@@ -935,6 +999,8 @@ impl App {
                 }
             }
             Message::SetupReconfigure => {
+                // Open the setup wizard from a running session. The previous
+                // state is stashed so Cancel can restore it.
                 self.setup_form = crate::app::SetupForm {
                     client_id: self.config.client_id.clone(),
                     client_secret: self.config.client_secret.clone(),
@@ -955,6 +1021,9 @@ impl App {
         }
     }
 
+    /// Schedules a debounced window-state save. If one is already pending, the
+    /// new one is dropped (the pending save will pick up the latest geometry
+    /// anyway because it reads from `self`).
     fn schedule_window_save(&mut self) -> Command<Message> {
         if self.pending_window_save {
             return Command::none();

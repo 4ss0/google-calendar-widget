@@ -1,16 +1,27 @@
+//! Color palette for the app. Two variants (light / dark) are returned as
+//! fully resolved `iced::Color` values so widgets never need to branch on
+//! the theme. The palette is stored in `App::theme` and passed by reference
+//! to the view functions.
+
 use iced::Color;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AppTheme {
     pub is_dark: bool,
+    /// Root window background (used with alpha at render time).
     pub bg: Color,
+    /// Slightly different surface used for banners, dropdowns, etc.
     pub surface_alt: Color,
+    /// Low-contrast border color for panels and cards.
     pub border_light: Color,
     pub text: Color,
     pub text_muted: Color,
     pub text_dim: Color,
+    /// Accent used for the "today" marker and selected pills.
     pub accent: Color,
+    /// Background fill of today's cell in the month grid.
     pub today_bg: Color,
+    /// Border of today's cell in the month grid.
     pub today_border: Color,
     pub cell_bg: Color,
     pub cell_bg_weekend: Color,
@@ -56,5 +67,4 @@ impl AppTheme {
             form_border: Color::from_rgb(0.30, 0.40, 0.55),
         }
     }
-
 }

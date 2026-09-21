@@ -1,3 +1,9 @@
+//! First-run setup wizard: collects OAuth credentials and the calendar id.
+//! Shown when no config file exists, or when opened via "Configure credentials".
+//!
+//! Includes inline help text explaining how to obtain the credentials from
+//! Google Cloud Console, since that's the biggest friction point for users.
+
 use crate::app::{App, SetupForm};
 use crate::messages::Message;
 use iced::widget::{button, column, container, scrollable, text, text_input};
@@ -19,6 +25,9 @@ pub fn view_setup<'a>(app: &'a App, form: &'a SetupForm) -> Element<'a, Message>
     .style(theme.text_muted)
     .into();
 
+    // Short, actionable help text. The Client Secret field is required by the
+    // UI even though Google's desktop OAuth doesn't strictly need it; keeping
+    // it simplifies the flow for users who already have both values.
     let help: Element<Message> = text(
         "If you don't have them, create a project on console.cloud.google.com, enable the Calendar API, \
          create OAuth credentials of type \"Desktop app\" and paste the Client ID and Client Secret here.",
@@ -37,6 +46,7 @@ pub fn view_setup<'a>(app: &'a App, form: &'a SetupForm) -> Element<'a, Message>
     .into();
 
     let client_secret_label: Element<Message> = text("Client Secret").size(13).style(t).into();
+    // `secure(true)` masks the secret.
     let client_secret_input: Element<Message> = text_input(
         "GOCSPX-xxxxxxxxxxxxxxxxxxxx",
         &form.client_secret,
@@ -52,6 +62,8 @@ pub fn view_setup<'a>(app: &'a App, form: &'a SetupForm) -> Element<'a, Message>
         .width(Length::Fixed(220.0))
         .into();
 
+    // Reserve a fixed-height slot so the layout doesn't jump when the error
+    // appears/disappears.
     let error_el: Element<Message> = if let Some(err) = &form.error {
         text(err.clone())
             .size(12)
@@ -66,6 +78,7 @@ pub fn view_setup<'a>(app: &'a App, form: &'a SetupForm) -> Element<'a, Message>
         .padding([8, 18])
         .into();
 
+    // max_width keeps the form readable on ultra-wide windows.
     let body = column(vec![
         title,
         subtitle,

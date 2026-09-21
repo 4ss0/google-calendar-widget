@@ -1,3 +1,11 @@
+//! Application top bar. Two variants:
+//!   - Wide (>= 800px): all controls on a single row.
+//!   - Narrow (< 800px): compact row plus a collapsible menu (toggle button)
+//!     that reveals search, transparency, autostart, etc.
+//!
+//! The bar includes an invisible full-width drag area so the user can move
+//! the window by clicking empty space (there's no OS title bar).
+
 use crate::app::App;
 use crate::messages::Message;
 use crate::ui::{self, AppTheme};
@@ -12,6 +20,7 @@ pub fn view_top_bar<'a>(
 ) -> Element<'a, Message> {
     let is_narrow = app.window_size.width < 800.0;
 
+    // Two title formats: long for the wide bar, short for the narrow one.
     let title_long = match layout {
         ui::Layout::Month => app.selected.format("%B %Y").to_string(),
         ui::Layout::Week => {
@@ -32,6 +41,7 @@ pub fn view_top_bar<'a>(
         ui::Layout::Day => app.selected.format("%d/%m").to_string(),
     };
 
+    // Label shows the theme you'll switch TO, not the current one.
     let theme_label = if app.theme.is_dark { "Light" } else { "Dark" };
 
     let prev_btn: Element<Message> = button(text("<").size(16))
@@ -51,6 +61,9 @@ pub fn view_top_bar<'a>(
         .on_press(Message::OpenCreateForm)
         .padding([2, 12])
         .into();
+
+    // Transparency controls: window_alpha is decremented/incremented by 0.08
+    // per click. "+" decreases transparency (more opaque), "-" increases it.
     let less_transp_btn: Element<Message> = button(text("+").size(14))
         .on_press(Message::DecreaseTransparency)
         .padding([2, 8])
@@ -98,6 +111,7 @@ pub fn view_top_bar<'a>(
         .padding([4, 6])
         .into();
 
+    // The clear button only takes up space when there's something to clear.
     let search_clear_btn: Element<Message> = if app.search_query.is_empty() {
         container(text("")).width(Length::Fixed(0.0)).into()
     } else {
@@ -107,6 +121,8 @@ pub fn view_top_bar<'a>(
             .into()
     };
 
+    // Invisible full-width drag area. Windows handles the actual move
+    // (Message::StartDrag -> iced::window::drag).
     let drag_area: Element<Message> = mouse_area(
         container(text(""))
             .width(Length::Fill)
@@ -144,6 +160,7 @@ pub fn view_top_bar<'a>(
         .into();
     }
 
+    // Narrow variant: compact single row + optional collapsible menu.
     let title: Element<Message> = container(
         text(title_short).size(15).style(theme.text),
     )

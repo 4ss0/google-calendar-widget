@@ -1,3 +1,6 @@
+//! Shared building blocks for rendering a single event box (used by all three
+//! calendar views) and color resolution helpers.
+
 use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
 use chrono::NaiveDate;
@@ -5,6 +8,7 @@ use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{column, container, mouse_area, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
+/// Parses "#rrggbb" into an iced Color. Returns None on malformed input.
 pub fn parse_hex_color(hex: &str) -> Option<Color> {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
@@ -16,6 +20,9 @@ pub fn parse_hex_color(hex: &str) -> Option<Color> {
     Some(Color::from_rgb(r, g, b))
 }
 
+/// Resolves an event's (background, foreground) colors from its color id.
+/// Falls back to a neutral gray for events without a color id or with an
+/// unknown one.
 pub fn event_colors(event: &CalendarEvent, palette: &ColorPalette) -> (Color, Color) {
     let bg = event
         .color_id
@@ -32,13 +39,18 @@ pub fn event_colors(event: &CalendarEvent, palette: &ColorPalette) -> (Color, Co
     (bg, fg)
 }
 
+/// Controls how the time is rendered inside an event box.
 #[derive(Debug, Clone, Copy)]
 pub enum TimeFormat {
+    /// No time shown (month view).
     None,
+    /// HH:MM (week view).
     StartOnly,
+    /// HH:MM – HH:MM (day view).
     Range,
 }
 
+/// Style knobs for the event box, one preset per layout.
 #[derive(Debug, Clone, Copy)]
 pub struct EventBoxStyle {
     pub font_size: u16,
@@ -59,6 +71,7 @@ impl EventBoxStyle {
             padding: [2, 5].into(),
             radius: 4.0,
             spacing: 0.0,
+            // Fixed height so all cells line up even with one-line summaries.
             min_height: Some(ef as f32 + 12.0),
         }
     }
@@ -77,6 +90,7 @@ impl EventBoxStyle {
 
     pub fn day(ef: u16) -> Self {
         Self {
+            // Slightly larger than the other layouts since there's more room.
             font_size: ef + 2,
             time_font_size: ef.saturating_sub(1),
             time_format: TimeFormat::Range,
@@ -88,6 +102,10 @@ impl EventBoxStyle {
     }
 }
 
+/// Renders a single event as a rounded, colored box. `source_date` is the
+/// date of the cell the box belongs to (used for drag & drop). When
+/// `dragging` is true the box is rendered with a dashed-style border and
+/// dimmed background to indicate it's the drag source.
 pub fn render_event_box<'a>(
     event: &'a CalendarEvent,
     palette: &'a ColorPalette,
@@ -138,6 +156,7 @@ pub fn render_event_box<'a>(
         ev_container = ev_container.height(Length::Fixed(h));
     }
 
+    // Drag visuals: accent border + dimmed background.
     let drag_border = Color::from_rgba(0.35, 0.55, 0.90, 0.95);
     let dim_bg = Color { a: 0.35, ..bg };
 
@@ -169,6 +188,8 @@ pub fn render_event_box<'a>(
         })
         .into();
 
+    // Pressing an event starts a potential drag; releasing without moving
+    // (handled in update.rs) opens the edit form.
     mouse_area(ev_box)
         .on_press(crate::Message::EventMouseDown {
             event: event.clone(),

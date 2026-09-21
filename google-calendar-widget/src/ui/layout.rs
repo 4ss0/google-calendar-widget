@@ -1,3 +1,14 @@
+//! Responsive layout selection and font-size heuristics.
+//!
+//! The layout is chosen purely from the window width so it can be recomputed
+//! cheaply on every resize without storing extra state:
+//!   - < 520px: Day view
+//!   - < 900px: Week view
+//!   - >= 900px: Month view
+//!
+//! Font sizes scale linearly with width between hard clamps so they remain
+//! legible on small windows and don't grow unbounded on 4K displays.
+
 use crate::api::colors::ColorPalette;
 use crate::app::EventIndex;
 use crate::ui::AppTheme;
@@ -23,18 +34,24 @@ impl Layout {
     }
 }
 
+/// Font size for the day number in month cells. Grows with window width.
 pub fn day_font(width: f32) -> u16 {
     (10.0 + (width - 400.0) / 70.0).clamp(10.0, 22.0) as u16
 }
 
+/// Font size for event summaries and times inside the calendar grid.
 pub fn event_font(width: f32) -> u16 {
     (8.0 + (width - 400.0) / 110.0).clamp(8.0, 14.0) as u16
 }
 
+/// Font size for weekday headers.
 pub fn header_font(width: f32) -> u16 {
     (12.0 + (width - 400.0) / 90.0).clamp(12.0, 18.0) as u16
 }
 
+/// Dispatches to the appropriate view module. `drag_source_id` and
+/// `drop_target` are only meaningful in Month/Week; Day ignores them.
+#[allow(clippy::too_many_arguments)]
 pub fn build_view<'a>(
     layout: Layout,
     selected: NaiveDate,

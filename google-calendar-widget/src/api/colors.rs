@@ -1,3 +1,9 @@
+//! Google Calendar's built-in 11-color palette.
+//!
+//! The API returns only an opaque color id ("1".."11") on each event; this
+//! module maps ids to background/foreground hex pairs for rendering. Values
+//! mirror the standard Google Calendar UI palette.
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
