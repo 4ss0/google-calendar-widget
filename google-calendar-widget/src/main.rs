@@ -233,7 +233,6 @@ impl Application for App {
                 search_query: String::new(),
                 drag: None,
                 hover_date: None,
-                last_desktop_foreground: false,
             },
             startup_cmd,
         )

@@ -301,7 +301,6 @@ pub struct App {
     pub search_query: String,
     pub drag: Option<DragState>,
     pub hover_date: Option<NaiveDate>,
-    pub last_desktop_foreground: bool,
 }
 
 impl App {

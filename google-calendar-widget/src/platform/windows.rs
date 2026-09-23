@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use windows::core::{IUnknown, PCWSTR};
 use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_CLOAKED,
+     DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_CLOAKED,
     DWMWA_EXCLUDED_FROM_PEEK,
 };
 use windows::Win32::System::Com::{
@@ -34,11 +34,11 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
+    CallWindowProcW, FindWindowW, GetClassNameW, GetWindowLongPtrW,
     GetWindowLongW, IsIconic, SendMessageTimeoutW, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow,
-    GWL_EXSTYLE, GWL_STYLE, GWLP_HWNDPARENT, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST,
-    HWND_TOP, HWND_TOPMOST, LWA_ALPHA, SMTO_ABORTIFHUNG,
+    GWL_EXSTYLE, GWL_STYLE, GWLP_HWNDPARENT, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST, 
+    LWA_ALPHA, SMTO_ABORTIFHUNG,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
     SW_RESTORE, WNDPROC, WM_APP, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_VISIBLE,
@@ -290,29 +290,6 @@ pub fn install_window_proc_hook(hwnd_raw: isize) -> bool {
     true
 }
 
-pub fn is_desktop_foreground() -> bool {
-    unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground.0.is_null() {
-            return false;
-        }
-        let mut class_buf = [0u16; 128];
-        let len = GetClassNameW(foreground, &mut class_buf);
-        if len <= 0 {
-            return false;
-        }
-        let class = String::from_utf16_lossy(&class_buf[..len as usize]);
-        class == "WorkerW" || class == "Progman"
-    }
-}
-
-pub fn is_window_foreground(hwnd_raw: isize) -> bool {
-    unsafe {
-        let hwnd = HWND(hwnd_raw as *mut _);
-        let fg = GetForegroundWindow();
-        fg == hwnd
-    }
-}
 
 pub fn uncloak_if_needed(hwnd_raw: isize) {
     unsafe {
@@ -349,28 +326,7 @@ pub fn exclude_from_peek(hwnd_raw: isize) {
     }
 }
 
-pub fn force_show_on_desktop(hwnd_raw: isize) {
-    unsafe {
-        let hwnd = HWND(hwnd_raw as *mut _);
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        uncloak_if_needed(hwnd_raw);
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOP,
-            0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
-        );
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        let _ = DwmFlush();
-    }
-}
+
 
 pub fn ensure_visible_bottom(hwnd_raw: isize) {
     unsafe {

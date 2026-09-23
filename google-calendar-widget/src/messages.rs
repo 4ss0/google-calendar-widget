@@ -3,7 +3,7 @@
 //! Every user interaction, async task completion, or timer tick is
 //! represented here. The variants are grouped by concern:
 //!   - Auth / data: TokenPolled, DataFetched
-//!   - Window plumbing: WindowResized, WindowMoved, KeepAtBottom, ...
+//!   - Window plumbing: WindowResized, WindowMoved, ...
 //!   - Calendar navigation: Prev, Next, Today
 //!   - Event form: Open*Form, Form*Changed, SaveEvent, DeleteEvent, ...
 //!   - Drag & drop: EventMouseDown, CellHover, EventMoved
@@ -101,8 +101,6 @@ pub enum Message {
     /// Re-applies alpha / taskbar removal at multiple delays after startup.
     ApplyWindowEffectsDeferred,
     HideOnStartup,
-    /// Re-pin the window to the bottom of the z-order.
-    KeepAtBottom,
 
     // --- Appearance & options -------------------------------------------
     IncreaseTransparency,
