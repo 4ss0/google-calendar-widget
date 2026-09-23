@@ -4,6 +4,7 @@ A lightweight desktop widget for Windows that displays your Google Calendar even
 
 ![Windows 11](https://img.shields.io/badge/Windows-11%20build%2022000%2B-blue)
 ![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue)
 
 ## ⚠️ Disclaimer
 
@@ -195,3 +196,13 @@ cargo run
 - **DST gaps:** `local_to_utc` and all-day parsing fall back to the next valid local time instead of silently shifting the event by a full timezone offset.
 - **OAuth callback** decodes `+` as space in `error_description`.
 - **UI:** color swatches resized so the form fits the minimum window width (360 px).
+
+---
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+Copyright 2025 Google Calendar Widget contributors
+
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
