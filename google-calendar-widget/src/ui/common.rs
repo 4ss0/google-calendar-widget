@@ -35,6 +35,17 @@ pub fn event_colors(event: &CalendarEvent, palette: &ColorPalette) -> (Color, Co
     (bg, fg)
 }
 
+/// Minimum height for a two-line month box (time above, summary below),
+/// including container padding.
+pub fn month_stacked_min(ef: u16) -> f32 {
+    (ef as f32) * 2.6 + 10.0
+}
+
+/// Minimum height for a one-line month box (time inline with summary).
+pub fn month_inline_min(ef: u16) -> f32 {
+    (ef as f32) * 1.4 + 6.0
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum TimeFormat {
     /// HH:MM (month and week views).
@@ -53,25 +64,22 @@ pub struct EventBoxStyle {
     pub padding: iced::Padding,
     pub radius: f32,
     pub spacing: f32,
-    /// When set, the box has exactly this height. The constructor picks a
-    /// height that is guaranteed to fit the chosen layout, so the text is
-    /// never clipped by the container.
+    /// When set, the box has exactly this height.
     pub fixed_height: Option<f32>,
-    /// When false, only a colored strip is rendered (no time, no summary).
-    /// Used when the available space is too small for any text.
+    /// When false, only a colored strip is rendered (no text at all).
     pub show_text: bool,
 }
 
 impl EventBoxStyle {
     /// Picks the layout that fits in `avail_h` pixels without clipping:
-    ///   - `avail_h` >= two lines worth -> time above summary
-    ///   - `avail_h` >= one line worth  -> time inline with summary
+    ///   - `avail_h` >= stacked minimum -> time above summary
+    ///   - `avail_h` >= inline minimum  -> time inline with summary
     ///   - otherwise                    -> plain colored strip
     pub fn month(ef: u16, avail_h: f32) -> Self {
-        let one_line_min = (ef as f32) * 1.3 + 6.0;
-        let two_line_min = (ef as f32) * 2.5 + 8.0;
+        let inline_min = month_inline_min(ef);
+        let stacked_min = month_stacked_min(ef);
 
-        if avail_h < one_line_min {
+        if avail_h < inline_min {
             Self {
                 font_size: ef,
                 time_font_size: 0,
@@ -83,7 +91,7 @@ impl EventBoxStyle {
                 fixed_height: Some(avail_h.max(3.0)),
                 show_text: false,
             }
-        } else if avail_h < two_line_min {
+        } else if avail_h < stacked_min {
             Self {
                 font_size: ef,
                 time_font_size: ef.saturating_sub(1),

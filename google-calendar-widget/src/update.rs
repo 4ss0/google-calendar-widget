@@ -117,7 +117,7 @@ impl App {
                     let dw = pos.x - sx;
                     let dh = pos.y - sy;
                     let new_w = (start_size.width + dw).max(360.0);
-                    let new_h = (start_size.height + dh).max(420.0);
+                    let new_h = (start_size.height + dh).max(480.0);
                     self.window_size = Size::new(new_w, new_h);
                     return iced::window::resize(iced::window::Id::MAIN, Size::new(new_w, new_h));
                 }

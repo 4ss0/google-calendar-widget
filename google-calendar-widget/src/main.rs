@@ -64,6 +64,8 @@ fn main() -> iced::Result {
             visible: !started_minimized,
             size,
             position,
+            // Floor chosen so the month view always has room for a one-line
+            // event box (time + summary) even with 6 visible weeks.
             min_size: Some(iced::Size::new(360.0, 420.0)),
             ..Default::default()
         },

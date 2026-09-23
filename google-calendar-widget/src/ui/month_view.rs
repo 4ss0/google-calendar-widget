@@ -1,6 +1,7 @@
-//! Month grid: 7 columns, up to 6 rows.
+//! Month grid: 7 columns, up to 6 rows. Each cell shows the day number, up
+//! to `max_events` events, and a "+N" indicator when there are more.
 
-use super::common::{render_event_box, EventBoxStyle};
+use super::common::{month_inline_min, month_stacked_min, render_event_box, EventBoxStyle};
 use super::layout::{day_font, event_font, header_font};
 use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
@@ -51,15 +52,31 @@ pub fn build_view<'a>(
     // Space available for event boxes inside the cell.
     let avail_for_events = (cell_h - day_label_h - 8.0).max(0.0);
 
-    // One-line event height (matches the minimum EventBoxStyle::month will use).
-    let one_line_min = (ef as f32) * 1.3 + 6.0;
+    // Try layouts in order of preference: stacked first, then inline, then
+    // strips. Each height includes a 2px safety margin over the minimum the
+    // style itself will check, so the box never clips its own content.
+    let stacked_h = month_stacked_min(ef) + 2.0;
+    let inline_h = month_inline_min(ef) + 2.0;
+    let strip_h = 8.0;
 
-    // How many one-line boxes fit. Clamped so the layout stays readable.
-    let max_events = ((avail_for_events + spacing) / (one_line_min + spacing))
-        .floor()
-        .clamp(1.0, 6.0) as usize;
+    let n_stack = ((avail_for_events + spacing) / (stacked_h + spacing)).floor() as i32;
+    let n_inline = ((avail_for_events + spacing) / (inline_h + spacing)).floor() as i32;
+    let n_strip = ((avail_for_events + spacing) / (strip_h + spacing)).floor() as i32;
 
-    // Per-box height the style will use to pick its layout.
+    // Prefer the richest layout that fits at least one event. Cap the count
+    // so cells don't get excessively dense.
+    let max_events: usize = if n_stack >= 1 {
+        (n_stack as usize).min(4)
+    } else if n_inline >= 1 {
+        (n_inline as usize).min(6)
+    } else if n_strip >= 1 {
+        (n_strip as usize).min(6)
+    } else {
+        1
+    };
+
+    // Height each event box will get. If more events exist than max_events,
+    // one slot is reserved for the "+N" badge in render_day.
     let avail_per_event = if max_events > 0 {
         (avail_for_events - spacing * (max_events as f32 - 1.0)) / max_events as f32
     } else {
@@ -177,9 +194,11 @@ fn render_day<'a>(
 
     let mut day_children: Vec<Element<'a, crate::Message>> = vec![day_label];
 
-    // Reserve a row for the "+N" badge only when we're actually showing 2+
-    // events; with max_events == 1 we prefer to show the event itself.
-    let show_more = events.len() > max_events && max_events >= 2;
+    // In strip mode the boxes are too thin to render a "+N" badge legibly;
+    // skip it in that case.
+    let strip_mode = avail_per_event < month_inline_min(ef);
+    let show_more =
+        !strip_mode && events.len() > max_events && max_events >= 2;
     let shown = if show_more {
         max_events - 1
     } else {
