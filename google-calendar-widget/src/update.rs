@@ -892,7 +892,7 @@ impl App {
                             |_| Message::ApplyWindowEffects,
                         );
 
-                        return Command::batch(vec![auth_cmd, platform_cmd]);
+                        Command::batch(vec![auth_cmd, platform_cmd])
                     }
                     Err(e) => {
                         self.setup_form.error =

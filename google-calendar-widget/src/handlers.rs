@@ -12,6 +12,7 @@
 //! `local_to_utc` handles the DST edge cases when converting naive local
 //! datetimes to UTC.
 
+use crate::api::client::EventInput;
 use crate::app::{ApiResult, App, DragState, EditScope, FormMode};
 use crate::messages::Message;
 use crate::persistence;
@@ -264,18 +265,19 @@ impl App {
                 refresh_token,
                 move |access| async move {
                     match mode {
-                        FormMode::Create => crate::api::client::create_event(
-                            &access,
-                            &calendar_id,
-                            &title,
-                            start_utc,
-                            end_utc,
-                            color_id.as_deref(),
-                            all_day,
-                            recurrence,
-                        )
-                        .await
-                        .map(|_| ()),
+                        FormMode::Create => {
+                            let input = EventInput {
+                                summary: &title,
+                                start: start_utc,
+                                end: end_utc,
+                                color_id: color_id.as_deref(),
+                                all_day,
+                                recurrence,
+                            };
+                            crate::api::client::create_event(&access, &calendar_id, input)
+                                .await
+                                .map(|_| ())
+                        }
                         FormMode::Edit(instance_id) => {
                             let is_recurring = recurring_event_id.is_some();
                             if is_recurring && scope == EditScope::ThisAndFollowing {
@@ -283,16 +285,19 @@ impl App {
                                 let orig = original_start.ok_or_else(|| {
                                     "Missing original start time".to_string()
                                 })?;
-                                crate::api::client::update_event_this_and_following(
-                                    &access,
-                                    &calendar_id,
-                                    &base,
-                                    orig,
+                                let input = EventInput::new(
                                     &title,
                                     start_utc,
                                     end_utc,
                                     color_id.as_deref(),
                                     all_day,
+                                );
+                                crate::api::client::update_event_this_and_following(
+                                    &access,
+                                    &calendar_id,
+                                    &base,
+                                    orig,
+                                    input,
                                 )
                                 .await
                                 .map(|_| ())
@@ -301,30 +306,36 @@ impl App {
                                 let orig = original_start.ok_or_else(|| {
                                     "Missing original start time".to_string()
                                 })?;
+                                let input = EventInput::new(
+                                    &title,
+                                    start_utc,
+                                    end_utc,
+                                    color_id.as_deref(),
+                                    all_day,
+                                );
                                 crate::api::client::update_event_all_occurrences(
                                     &access,
                                     &calendar_id,
                                     &base,
                                     orig,
-                                    &title,
-                                    start_utc,
-                                    end_utc,
-                                    color_id.as_deref(),
-                                    all_day,
+                                    input,
                                 )
                                 .await
                                 .map(|_| ())
                             } else {
                                 // OnlyThis or non-recurring: PATCH the instance.
-                                crate::api::client::update_event(
-                                    &access,
-                                    &calendar_id,
-                                    &instance_id,
+                                let input = EventInput::new(
                                     &title,
                                     start_utc,
                                     end_utc,
                                     color_id.as_deref(),
                                     all_day,
+                                );
+                                crate::api::client::update_event(
+                                    &access,
+                                    &calendar_id,
+                                    &instance_id,
+                                    input,
                                 )
                                 .await
                                 .map(|_| ())
@@ -442,19 +453,18 @@ impl App {
                 expires_at,
                 refresh_token,
                 move |access| async move {
-                    crate::api::client::create_event(
-                        &access,
-                        &calendar_id,
-                        &summary,
+                    let input = EventInput {
+                        summary: &summary,
                         start,
                         end,
-                        color_id.as_deref(),
+                        color_id: color_id.as_deref(),
                         all_day,
                         recurrence,
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                    };
+                    crate::api::client::create_event(&access, &calendar_id, input)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                 },
             ),
             Message::UndoCompleted,
@@ -514,15 +524,13 @@ impl App {
                 expires_at,
                 refresh_token,
                 move |access| async move {
+                    let input =
+                        EventInput::new(&summary, new_start, new_end, color_id.as_deref(), all_day);
                     crate::api::client::update_event(
                         &access,
                         &calendar_id,
                         &instance_id,
-                        &summary,
-                        new_start,
-                        new_end,
-                        color_id.as_deref(),
-                        all_day,
+                        input,
                     )
                     .await
                     .map(|_| ())

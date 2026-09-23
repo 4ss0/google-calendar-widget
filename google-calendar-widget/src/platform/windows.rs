@@ -214,11 +214,10 @@ unsafe extern "system" fn window_proc_hook(
         return LRESULT(0);
     }
 
-    if msg == WM_SYSCOMMAND {
-        if (wparam.0 & SC_MINIMIZE_MASK) == SC_MINIMIZE_VAL {
+    if msg == WM_SYSCOMMAND
+        && (wparam.0 & SC_MINIMIZE_MASK) == SC_MINIMIZE_VAL {
             return LRESULT(0);
         }
-    }
 
     if msg == WM_SIZE && wparam.0 == 0 {
         return LRESULT(0);

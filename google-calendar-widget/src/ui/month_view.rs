@@ -30,7 +30,7 @@ pub fn build_view<'a>(
     let first_day = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
     let total_days = days_in_month(year, month);
     let start_weekday = first_day.weekday().num_days_from_monday();
-    let weeks_needed = ((start_weekday + total_days + 6) / 7) as u32;
+    let weeks_needed = (start_weekday + total_days).div_ceil(7);
 
     let q: Option<&str> = if search_query.trim().is_empty() {
         None
