@@ -168,3 +168,30 @@ To reset everything, delete the whole `%APPDATA%\example\gcal-widget\` folder.
 ## Building from source
 
 Install [Rust](https://rustup.rs/) (stable toolchain) and the [Visual Studio C++ build tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/), then:
+
+cargo build --release
+
+
+The binary is produced in `target/release/google-calendar-widget.exe`.
+
+For development:
+
+cargo run
+
+
+---
+
+## What's new in 1.3.0
+
+- **DST-safe drag & drop:** moving an event across a daylight-saving boundary now preserves the local wall-clock time (10:00 stays 10:00) and the correct all-day date.
+- **Recurring series updates:** editing "All events" now correctly propagates changes to the end time / duration, not just the start.
+- **"This and following" split:** the new tail of a split series keeps the original `UNTIL` boundary, so a bounded series no longer silently becomes infinite.
+- **Recurrence end validation:** the *Until* date is rejected if it falls before the event's start date.
+- **Undo safety:** the undo banner is only offered for non-recurring events.
+- **Window startup:** the first-run window position is no longer baked in as `(0, 0)`.
+- **Minimize handling:** a `(0, 0)` resize (tray minimize) is no longer treated as a real size.
+- **Startup visibility:** the delayed hide timer no longer contradicts `reveal_window()`, avoiding a brief flash on launch.
+- **Empty-title confirmation** can no longer be bypassed by clicking **Save** twice.
+- **DST gaps:** `local_to_utc` and all-day parsing fall back to the next valid local time instead of silently shifting the event by a full timezone offset.
+- **OAuth callback** decodes `+` as space in `error_description`.
+- **UI:** color swatches resized so the form fits the minimum window width (360 px).
