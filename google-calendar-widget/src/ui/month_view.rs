@@ -1,9 +1,4 @@
-//! Month grid: 7 columns, up to 6 rows. Each cell shows the day number, up
-//! to `max_events` events, and a "+N" indicator when there are more.
-//!
-//! Cell height is computed from the available vertical space so the grid
-//! always fills the window without scrolling. The number of events shown per
-//! cell is derived from that height, so it adapts automatically.
+//! Month grid: 7 columns, up to 6 rows.
 
 use super::common::{render_event_box, EventBoxStyle};
 use super::layout::{day_font, event_font, header_font};
@@ -33,7 +28,6 @@ pub fn build_view<'a>(
     let today = chrono::Local::now().date_naive();
     let first_day = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
     let total_days = days_in_month(year, month);
-    // 0=Monday, 6=Sunday (chrono's num_days_from_monday).
     let start_weekday = first_day.weekday().num_days_from_monday();
     let weeks_needed = ((start_weekday + total_days + 6) / 7) as u32;
 
@@ -47,23 +41,36 @@ pub fn build_view<'a>(
     let ef = event_font(width);
     let hf = header_font(width);
 
-    // Vertical layout: reserve a fixed chrome (top bar + weekday header) and
-    // divide the rest equally among rows.
     let chrome = 130.0;
     let weeks_f = weeks_needed as f32;
     let cell_h = ((height - chrome) / weeks_f).max(40.0);
+
     let day_label_h = df as f32 + 8.0;
-    let event_h = ef as f32 + 12.0 + 3.0;
-    let rows_for_events = ((cell_h - day_label_h - 8.0) / event_h).floor();
-    // Hard clamp: 1..6 events per cell.
-    let max_events = (rows_for_events as usize).clamp(1, 6);
+    let spacing = 3.0;
+
+    // Space available for event boxes inside the cell.
+    let avail_for_events = (cell_h - day_label_h - 8.0).max(0.0);
+
+    // One-line event height (matches the minimum EventBoxStyle::month will use).
+    let one_line_min = (ef as f32) * 1.3 + 6.0;
+
+    // How many one-line boxes fit. Clamped so the layout stays readable.
+    let max_events = ((avail_for_events + spacing) / (one_line_min + spacing))
+        .floor()
+        .clamp(1.0, 6.0) as usize;
+
+    // Per-box height the style will use to pick its layout.
+    let avail_per_event = if max_events > 0 {
+        (avail_for_events - spacing * (max_events as f32 - 1.0)) / max_events as f32
+    } else {
+        avail_for_events
+    };
 
     let weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     let header: Vec<Element<'a, crate::Message>> = weekdays
         .iter()
         .enumerate()
         .map(|(i, w)| -> Element<'a, crate::Message> {
-            // Weekend headers are dimmer to visually group the week.
             let c = if i >= 5 { theme.text_dim } else { theme.text_muted };
             container(text(*w).size(hf).style(c))
                 .width(Length::FillPortion(1))
@@ -73,7 +80,6 @@ pub fn build_view<'a>(
         })
         .collect();
 
-    // Build the grid, leaving empty cells before day 1 and after the last day.
     let mut current_day = 1u32;
     let mut weeks: Vec<Element<'a, crate::Message>> = Vec::new();
 
@@ -103,6 +109,7 @@ pub fn build_view<'a>(
                     df,
                     ef,
                     max_events,
+                    avail_per_event,
                     drag_source_id,
                     is_drop_target,
                 ));
@@ -123,7 +130,6 @@ pub fn build_view<'a>(
         .into()
 }
 
-/// Renders one month cell (day number + up to `max_events` events + "+N").
 #[allow(clippy::too_many_arguments)]
 fn render_day<'a>(
     date: NaiveDate,
@@ -136,6 +142,7 @@ fn render_day<'a>(
     df: u16,
     ef: u16,
     max_events: usize,
+    avail_per_event: f32,
     drag_source_id: Option<&'a str>,
     is_drop_target: bool,
 ) -> Element<'a, crate::Message> {
@@ -147,7 +154,6 @@ fn render_day<'a>(
         theme.text
     };
 
-    // Today's day number is drawn on a filled accent circle.
     let today_bg = theme.accent;
     let day_label: Element<'a, crate::Message> = if is_today {
         container(text(day.to_string()).size(df).style(Color::WHITE))
@@ -171,12 +177,13 @@ fn render_day<'a>(
 
     let mut day_children: Vec<Element<'a, crate::Message>> = vec![day_label];
 
-    // If there are more events than fit, reserve one row for the "+N" badge.
-    let show_more = events.len() > max_events;
+    // Reserve a row for the "+N" badge only when we're actually showing 2+
+    // events; with max_events == 1 we prefer to show the event itself.
+    let show_more = events.len() > max_events && max_events >= 2;
     let shown = if show_more {
-        max_events.saturating_sub(1)
+        max_events - 1
     } else {
-        events.len()
+        events.len().min(max_events)
     };
 
     for event in events.iter().take(shown) {
@@ -184,7 +191,7 @@ fn render_day<'a>(
         day_children.push(render_event_box(
             event,
             palette,
-            EventBoxStyle::month(ef),
+            EventBoxStyle::month(ef, avail_per_event),
             date,
             dragging,
         ));
@@ -200,7 +207,6 @@ fn render_day<'a>(
 
     let day_col: Element<'a, crate::Message> = column(day_children).spacing(3).into();
 
-    // Cell background/border: highlight drop target > today > weekend > normal.
     let cell_bg = if is_drop_target {
         Color::from_rgba(0.35, 0.55, 0.90, 0.20)
     } else if is_today {
@@ -220,7 +226,6 @@ fn render_day<'a>(
     };
 
     let cell_border_w = if is_drop_target { 2.0 } else { 1.0 };
-
     let cell_text = theme.text;
 
     let cell: Element<'a, crate::Message> = container(day_col)
@@ -239,8 +244,6 @@ fn render_day<'a>(
         })
         .into();
 
-    // Click on empty space creates an event for that day. Events have their
-    // own mouse_area (see render_event_box) which captures the press first.
     mouse_area(cell)
         .on_press(crate::Message::OpenCreateFormForDate(date))
         .on_move(move |_| crate::Message::CellHover(date))

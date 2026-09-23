@@ -1,6 +1,4 @@
-//! Top-level view composition: wraps the current state's content in the app
-//! shell (outer container, optional resize handle) and dispatches to the
-//! specific screen based on AppState.
+//! Top-level view composition.
 
 mod form;
 mod handle;
@@ -10,20 +8,17 @@ mod top_bar;
 use crate::app::{App, AppState};
 use crate::messages::Message;
 use crate::ui;
+use crate::ui::strings::CURRENT as S;
 use iced::widget::container::Appearance as ContainerAppearance;
 use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
-/// Outer container style: rounded, semi-transparent, subtle border.
-/// `alpha` is applied to the theme background color so the desktop shows
-/// through the widget.
 fn outer_style(
     theme: &ui::AppTheme,
     alpha: f32,
 ) -> impl Fn(&Theme) -> ContainerAppearance + 'static {
     let base = theme.bg;
     let bg_color = Color::from_rgba(base.r, base.g, base.b, alpha);
-    // Border derives from alpha so it fades in/out with the background.
     let border_color = if theme.is_dark {
         Color::from_rgba(0.25, 0.25, 0.32, (alpha * 0.9).min(0.9))
     } else {
@@ -42,8 +37,6 @@ fn outer_style(
     }
 }
 
-/// Wraps `content` in the outer rounded container and adds the bottom-right
-/// resize handle below it.
 fn wrap_with_handle<'a>(
     content: Element<'a, Message>,
     theme: &'a ui::AppTheme,
@@ -65,8 +58,6 @@ fn wrap_with_handle<'a>(
         .into()
 }
 
-/// Minimal top bar used only in Setup mode: title + optional Cancel (only
-/// when the wizard was opened from a running session) + Close.
 fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
     let theme = &app.theme;
 
@@ -78,7 +69,6 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
     .padding([4, 6])
     .into();
 
-    // A full-width invisible area that initiates an OS-level window drag.
     let drag_area: Element<Message> = mouse_area(
         container(text(""))
             .width(Length::Fill)
@@ -87,9 +77,8 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
     .on_press(Message::StartDrag)
     .into();
 
-    // Cancel is only shown when there's a previous state to restore.
     let cancel_btn: Element<Message> = if app.state_before_setup.is_some() {
-        button(text("Cancel").size(12))
+        button(text(S.auth_cancel).size(12))
             .on_press(Message::SetupCancel)
             .padding([4, 10])
             .into()
@@ -108,17 +97,18 @@ fn setup_top_bar<'a>(app: &'a App) -> Element<'a, Message> {
         .into()
 }
 
-/// Undo banner shown after deleting an event (until UNDO_WINDOW_SECS expires
-/// or the user dismisses it). Returns None when there's no pending undo.
 fn undo_banner<'a>(app: &'a App) -> Option<Element<'a, Message>> {
     let pending = app.pending_undo.as_ref()?;
     let theme = &app.theme;
 
-    let label: Element<Message> = text(format!("Event deleted: {}", pending.event.summary))
-        .size(13)
-        .style(theme.text)
-        .into();
-    let undo_btn: Element<Message> = button(text("Undo").size(12))
+    let label: Element<Message> = text(format!(
+        "{} {}",
+        S.undo_event_deleted, pending.event.summary
+    ))
+    .size(13)
+    .style(theme.text)
+    .into();
+    let undo_btn: Element<Message> = button(text(S.undo).size(12))
         .on_press(Message::UndoDelete)
         .padding([4, 10])
         .into();
@@ -153,12 +143,6 @@ fn undo_banner<'a>(app: &'a App) -> Option<Element<'a, Message>> {
     )
 }
 
-/// Main view entry point. Dispatches on AppState:
-///   - Setup: setup wizard with its own minimal top bar.
-///   - WaitingAuth: "authorization in progress" screen.
-///   - Loading: spinner placeholder.
-///   - Ready: top bar + undo banner + form + calendar grid.
-///   - Error: error message + Retry/Re-authenticate/Configure buttons.
 pub fn view(app: &App) -> Element<'_, Message> {
     let theme = &app.theme;
     let alpha = app.bg_alpha;
@@ -180,21 +164,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
         AppState::Setup => unreachable!(),
         AppState::WaitingAuth => {
             let t = theme.text;
-            let retry_btn: Element<Message> = button(text("Retry").size(13))
+            let retry_btn: Element<Message> = button(text(S.auth_retry).size(13))
                 .on_press(Message::RetryAuth)
                 .padding([6, 14])
                 .into();
-            let cancel_btn: Element<Message> = button(text("Cancel").size(13))
+            let cancel_btn: Element<Message> = button(text(S.auth_cancel).size(13))
                 .on_press(Message::CancelAuth)
                 .padding([6, 14])
                 .into();
             let buttons: Element<Message> =
                 row(vec![retry_btn, cancel_btn]).spacing(8).into();
             column(vec![
-                text("Google Calendar Authorization").size(20).style(t).into(),
-                text("The browser has been opened for authorization.").style(t).into(),
-                text("Complete login and grant access.").style(t).into(),
-                text("Waiting for confirmation...").style(t).into(),
+                text(S.auth_title).size(20).style(t).into(),
+                text(S.auth_browser_opened).style(t).into(),
+                text(S.auth_complete_login).style(t).into(),
+                text(S.auth_waiting).style(t).into(),
                 container(buttons).padding([12, 0]).into(),
             ])
             .spacing(12)
@@ -204,7 +188,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .into()
         }
         AppState::Loading => container(
-            text("Loading events...").size(18).style(theme.text),
+            text(S.loading_events).size(18).style(theme.text),
         )
         .padding(20)
         .width(Length::Fill)
@@ -217,17 +201,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 items.push(banner);
             }
 
-            // Inline error message (e.g. failed save) above the calendar.
             if let Some(err) = &app.last_error {
                 items.push(
-                    text(format!("Error: {}", err))
+                    text(format!("{} {}", S.error_prefix, err))
                         .size(13)
                         .style(theme.text)
                         .into(),
                 );
             }
 
-            // The event form (create/edit) overlays the calendar inline.
             if let Some(form) = &app.form {
                 items.push(form::view_form(form, &app.palette, theme, app.saving));
             }
@@ -237,7 +219,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .as_ref()
                 .map(|d| d.event.id.as_str());
 
-            // Only show a drop target while the drag is "real" (past threshold).
             let drop_target = match &app.drag {
                 Some(d) if d.moved => app.hover_date,
                 _ => None,
@@ -264,27 +245,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .into()
         }
         AppState::Error(e) => {
-            let msg: Element<Message> = text(format!("Error: {}", e))
+            let msg: Element<Message> = text(format!("{} {}", S.error_prefix, e))
                 .size(16)
                 .style(theme.text)
                 .into();
-            // Guidance to avoid unnecessary re-auth when it's just a network issue.
-            let hint: Element<Message> = text(
-                "If the problem is a missing internet connection, click Retry once it is back. \
-                 Use \"Re-authenticate\" only if you want to sign in with a different account.",
-            )
-            .size(12)
-            .style(theme.text_muted)
-            .into();
-            let retry_btn: Element<Message> = button(text("Retry").size(13))
+            let hint: Element<Message> = text(S.error_hint)
+                .size(12)
+                .style(theme.text_muted)
+                .into();
+            let retry_btn: Element<Message> = button(text(S.auth_retry).size(13))
                 .on_press(Message::RetryAuth)
                 .padding([6, 14])
                 .into();
-            let reauth_btn: Element<Message> = button(text("Re-authenticate").size(13))
+            let reauth_btn: Element<Message> = button(text(S.error_reauth).size(13))
                 .on_press(Message::Reauthenticate)
                 .padding([6, 14])
                 .into();
-            let settings_btn: Element<Message> = button(text("Configure credentials").size(13))
+            let settings_btn: Element<Message> = button(text(S.error_configure).size(13))
                 .on_press(Message::SetupReconfigure)
                 .padding([6, 14])
                 .into();

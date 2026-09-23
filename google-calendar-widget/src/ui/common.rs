@@ -5,10 +5,9 @@ use crate::api::client::CalendarEvent;
 use crate::api::colors::ColorPalette;
 use chrono::NaiveDate;
 use iced::widget::container::Appearance as ContainerAppearance;
-use iced::widget::{column, container, mouse_area, text};
+use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
-/// Parses "#rrggbb" into an iced Color. Returns None on malformed input.
 pub fn parse_hex_color(hex: &str) -> Option<Color> {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
@@ -20,9 +19,6 @@ pub fn parse_hex_color(hex: &str) -> Option<Color> {
     Some(Color::from_rgb(r, g, b))
 }
 
-/// Resolves an event's (background, foreground) colors from its color id.
-/// Falls back to a neutral gray for events without a color id or with an
-/// unknown one.
 pub fn event_colors(event: &CalendarEvent, palette: &ColorPalette) -> (Color, Color) {
     let bg = event
         .color_id
@@ -39,40 +35,78 @@ pub fn event_colors(event: &CalendarEvent, palette: &ColorPalette) -> (Color, Co
     (bg, fg)
 }
 
-/// Controls how the time is rendered inside an event box.
 #[derive(Debug, Clone, Copy)]
 pub enum TimeFormat {
-    /// No time shown (month view).
-    None,
-    /// HH:MM (week view).
+    /// HH:MM (month and week views).
     StartOnly,
     /// HH:MM – HH:MM (day view).
     Range,
 }
 
-/// Style knobs for the event box, one preset per layout.
 #[derive(Debug, Clone, Copy)]
 pub struct EventBoxStyle {
     pub font_size: u16,
     pub time_font_size: u16,
     pub time_format: TimeFormat,
+    /// When true, the time shares a line with the summary (compact layout).
+    pub inline_time: bool,
     pub padding: iced::Padding,
     pub radius: f32,
     pub spacing: f32,
-    pub min_height: Option<f32>,
+    /// When set, the box has exactly this height. The constructor picks a
+    /// height that is guaranteed to fit the chosen layout, so the text is
+    /// never clipped by the container.
+    pub fixed_height: Option<f32>,
+    /// When false, only a colored strip is rendered (no time, no summary).
+    /// Used when the available space is too small for any text.
+    pub show_text: bool,
 }
 
 impl EventBoxStyle {
-    pub fn month(ef: u16) -> Self {
-        Self {
-            font_size: ef,
-            time_font_size: 0,
-            time_format: TimeFormat::None,
-            padding: [2, 5].into(),
-            radius: 4.0,
-            spacing: 0.0,
-            // Fixed height so all cells line up even with one-line summaries.
-            min_height: Some(ef as f32 + 12.0),
+    /// Picks the layout that fits in `avail_h` pixels without clipping:
+    ///   - `avail_h` >= two lines worth -> time above summary
+    ///   - `avail_h` >= one line worth  -> time inline with summary
+    ///   - otherwise                    -> plain colored strip
+    pub fn month(ef: u16, avail_h: f32) -> Self {
+        let one_line_min = (ef as f32) * 1.3 + 6.0;
+        let two_line_min = (ef as f32) * 2.5 + 8.0;
+
+        if avail_h < one_line_min {
+            Self {
+                font_size: ef,
+                time_font_size: 0,
+                time_format: TimeFormat::StartOnly,
+                inline_time: true,
+                padding: 0.0.into(),
+                radius: 3.0,
+                spacing: 0.0,
+                fixed_height: Some(avail_h.max(3.0)),
+                show_text: false,
+            }
+        } else if avail_h < two_line_min {
+            Self {
+                font_size: ef,
+                time_font_size: ef.saturating_sub(1),
+                time_format: TimeFormat::StartOnly,
+                inline_time: true,
+                padding: [1, 5].into(),
+                radius: 4.0,
+                spacing: 0.0,
+                fixed_height: Some(avail_h),
+                show_text: true,
+            }
+        } else {
+            Self {
+                font_size: ef,
+                time_font_size: ef.saturating_sub(1),
+                time_format: TimeFormat::StartOnly,
+                inline_time: false,
+                padding: [2, 5].into(),
+                radius: 4.0,
+                spacing: 1.0,
+                fixed_height: Some(avail_h),
+                show_text: true,
+            }
         }
     }
 
@@ -81,31 +115,30 @@ impl EventBoxStyle {
             font_size: ef,
             time_font_size: ef.saturating_sub(1),
             time_format: TimeFormat::StartOnly,
+            inline_time: false,
             padding: 5.0.into(),
             radius: 5.0,
             spacing: 1.0,
-            min_height: None,
+            fixed_height: None,
+            show_text: true,
         }
     }
 
     pub fn day(ef: u16) -> Self {
         Self {
-            // Slightly larger than the other layouts since there's more room.
             font_size: ef + 2,
             time_font_size: ef.saturating_sub(1),
             time_format: TimeFormat::Range,
+            inline_time: false,
             padding: 10.0.into(),
             radius: 8.0,
             spacing: 2.0,
-            min_height: None,
+            fixed_height: None,
+            show_text: true,
         }
     }
 }
 
-/// Renders a single event as a rounded, colored box. `source_date` is the
-/// date of the cell the box belongs to (used for drag & drop). When
-/// `dragging` is true the box is rendered with a dashed-style border and
-/// dimmed background to indicate it's the drag source.
 pub fn render_event_box<'a>(
     event: &'a CalendarEvent,
     palette: &'a ColorPalette,
@@ -114,51 +147,103 @@ pub fn render_event_box<'a>(
     dragging: bool,
 ) -> Element<'a, crate::Message> {
     let (bg, fg) = event_colors(event, palette);
+    let drag_border = Color::from_rgba(0.35, 0.55, 0.90, 0.95);
+    let dim_bg = Color { a: 0.35, ..bg };
 
-    let time_str: Option<String> = match style.time_format {
-        TimeFormat::None => None,
-        TimeFormat::StartOnly => {
-            let start = event.start.with_timezone(&chrono::Local);
-            Some(start.format("%H:%M").to_string())
-        }
-        TimeFormat::Range => {
-            let start = event.start.with_timezone(&chrono::Local);
-            match event.end {
-                Some(e) => {
-                    let end = e.with_timezone(&chrono::Local);
-                    Some(format!(
-                        "{} – {}",
-                        start.format("%H:%M"),
-                        end.format("%H:%M")
-                    ))
+    // Strip-only fallback: the cell is too short for any text.
+    if !style.show_text {
+        let h = style.fixed_height.unwrap_or(4.0).max(3.0);
+        let strip: Element<'a, crate::Message> = container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fixed(h))
+            .style(move |_theme: &Theme| {
+                let (b, bc, bw) = if dragging {
+                    (dim_bg, drag_border, 2.0)
+                } else {
+                    (bg, Color::TRANSPARENT, 0.0)
+                };
+                ContainerAppearance {
+                    text_color: None,
+                    background: Some(Background::Color(b)),
+                    border: Border {
+                        color: bc,
+                        width: bw,
+                        radius: style.radius.into(),
+                    },
+                    shadow: Default::default(),
                 }
-                None => Some(start.format("%H:%M").to_string()),
+            })
+            .into();
+        return mouse_area(strip)
+            .on_press(crate::Message::EventMouseDown {
+                event: event.clone(),
+                source_date,
+            })
+            .on_move(move |_| crate::Message::CellHover(source_date))
+            .into();
+    }
+
+    // All-day events have no meaningful wall-clock time; suppress the label.
+    let time_str: Option<String> = if event.all_day {
+        None
+    } else {
+        match style.time_format {
+            TimeFormat::StartOnly => {
+                let start = event.start.with_timezone(&chrono::Local);
+                Some(start.format("%H:%M").to_string())
+            }
+            TimeFormat::Range => {
+                let start = event.start.with_timezone(&chrono::Local);
+                match event.end {
+                    Some(e) => {
+                        let end = e.with_timezone(&chrono::Local);
+                        Some(format!(
+                            "{} – {}",
+                            start.format("%H:%M"),
+                            end.format("%H:%M")
+                        ))
+                    }
+                    None => Some(start.format("%H:%M").to_string()),
+                }
             }
         }
     };
 
-    let mut content: Vec<Element<'a, crate::Message>> = Vec::new();
-    if let Some(ts) = time_str {
-        content.push(text(ts).size(style.time_font_size).style(fg).into());
-    }
-    content.push(
-        text(event.summary.clone())
-            .size(style.font_size)
-            .style(fg)
-            .into(),
-    );
+    let content: Element<'a, crate::Message> = match (style.inline_time, time_str) {
+        (true, Some(ts)) => row(vec![
+            text(ts).size(style.time_font_size).style(fg).into(),
+            text(event.summary.clone())
+                .size(style.font_size)
+                .style(fg)
+                .into(),
+        ])
+        .spacing(4)
+        .into(),
+        (_, Some(ts)) => column(vec![
+            text(ts).size(style.time_font_size).style(fg).into(),
+            text(event.summary.clone())
+                .size(style.font_size)
+                .style(fg)
+                .into(),
+        ])
+        .spacing(style.spacing)
+        .into(),
+        (_, None) => column(vec![
+            text(event.summary.clone())
+                .size(style.font_size)
+                .style(fg)
+                .into(),
+        ])
+        .into(),
+    };
 
-    let mut ev_container = container(column(content).spacing(style.spacing))
+    let mut ev_container = container(content)
         .padding(style.padding)
         .width(Length::Fill);
 
-    if let Some(h) = style.min_height {
+    if let Some(h) = style.fixed_height {
         ev_container = ev_container.height(Length::Fixed(h));
     }
-
-    // Drag visuals: accent border + dimmed background.
-    let drag_border = Color::from_rgba(0.35, 0.55, 0.90, 0.95);
-    let dim_bg = Color { a: 0.35, ..bg };
 
     let ev_box: Element<'a, crate::Message> = ev_container
         .style(move |_theme: &Theme| {
@@ -188,8 +273,6 @@ pub fn render_event_box<'a>(
         })
         .into();
 
-    // Pressing an event starts a potential drag; releasing without moving
-    // (handled in update.rs) opens the edit form.
     mouse_area(ev_box)
         .on_press(crate::Message::EventMouseDown {
             event: event.clone(),

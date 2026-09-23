@@ -20,6 +20,7 @@ rand = "0.8"
 open = "5"
 tray-icon = "0.13"
 iana-time-zone = "0.1"
+sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # Win32_UI_Accessibility is required for SetWinEventHook.

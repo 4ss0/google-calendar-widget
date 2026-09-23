@@ -1,10 +1,11 @@
 //! Day view: single column with a big date header and the full list of
-//! events for the selected day. Used when the window is narrow (< 520px).
+//! events for the selected day.
 
 use super::common::{render_event_box, EventBoxStyle};
 use super::layout::event_font;
 use crate::api::colors::ColorPalette;
 use crate::app::EventIndex;
+use crate::ui::strings::CURRENT as S;
 use crate::ui::AppTheme;
 use chrono::NaiveDate;
 use iced::widget::{column, container, mouse_area, scrollable, text};
@@ -36,17 +37,14 @@ pub fn build_view<'a>(
 
     let mut evs: Vec<Element<'a, crate::Message>> = Vec::new();
     if day_events.is_empty() {
-        // Differentiate "no events" from "no results for this query".
         let msg = if search_active {
-            "No matching events"
+            S.no_matching_events
         } else {
-            "No events"
+            S.no_events
         };
         evs.push(
             container(
-                text(msg)
-                    .size(ef)
-                    .style(theme.text_muted),
+                text(msg).size(ef).style(theme.text_muted),
             )
             .padding(20)
             .width(Length::Fill)
@@ -67,8 +65,6 @@ pub fn build_view<'a>(
 
     let ev_col: Element<'a, crate::Message> = column(evs).spacing(6).into();
 
-    // Only wrap in a scrollable when the estimated content exceeds the
-    // available vertical space (see week_view for the rationale).
     let available = (height - 140.0).max(0.0);
     let event_h = (ef as f32) * 3.0 + 40.0;
     let max_events = (available / event_h).floor() as usize;
@@ -96,7 +92,6 @@ pub fn build_view<'a>(
         .height(Length::Fill)
         .into();
 
-    // Clicking empty space creates an event for the selected day.
     mouse_area(content)
         .on_press(crate::Message::OpenCreateFormForDate(selected))
         .into()

@@ -919,6 +919,28 @@ impl App {
                 }
                 Command::none()
             }
+            Message::FormDateToday => {
+                if let Some(f) = &mut self.form {
+                    let today = chrono::Local::now()
+                        .date_naive()
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    f.date = today.clone();
+                    if f.end_date.is_empty() || f.end_date < today {
+                        f.end_date = today;
+                    }
+                }
+                Command::none()
+            }
+            Message::FormStartNow => {
+                if let Some(f) = &mut self.form {
+                    let now = chrono::Local::now();
+                    f.start_time = now.format("%H:%M").to_string();
+                    f.end_time =
+                        (now + Duration::hours(1)).format("%H:%M").to_string();
+                }
+                Command::none()
+            }
         }
     }
 
