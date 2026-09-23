@@ -3,19 +3,18 @@
 //! Goal: make the iced window behave like a desktop widget:
 //!   * Always behind normal applications but above the wallpaper.
 //!   * Removed from the taskbar and Alt+Tab.
-//!   * Clickable (receives input) but never steals focus unexpectedly.
+//!   * Never hidden by Win+D / Show Desktop.
 //!
-//! Key tricks:
-//!   - WM_WINDOWPOSCHANGING hook: when the OS tries to minimize the window to
-//!     (-32000, -32000) (the classic "minimize to tray" position), intercept
-//!     it and instead keep the window in place at the bottom of the z-order.
-//!     This makes Win+D / Show Desktop not hide the widget.
-//!   - is_window_foreground check in the KeepAtBottom loop: while the user is
-//!     interacting with the widget we don't touch z-order or visibility, to
-//!     avoid flicker.
-//!   - WS_EX_TOOLWINDOW: removes the window from taskbar and Alt+Tab.
-//!   - DWM cloak check: after a Show Desktop, Windows may "cloak" the window
-//!     without hiding it; we uncloak explicitly.
+//! Strategy:
+//!   1. Custom WndProc that blocks minimize/hide attempts (WM_SYSCOMMAND
+//!      SC_MINIMIZE, WM_SIZE SIZE_MINIMIZED, WM_SHOWWINDOW wparam=0) and
+//!      rewrites the Win+D WM_WINDOWPOSCHANGING (-32000,-32000) into a
+//!      "keep in place, stay at HWND_BOTTOM" request.
+//!   2. Soft reparenting to Progman via GWLP_HWNDPARENT (NOT SetParent,
+//!      which fails silently on Win11 24H2). Executed on the window's own
+//!      thread by posting a custom WM_APP message.
+//!   3. A SetWinEventHook on the foreground event that re-asserts the
+//!      widget at HWND_BOTTOM whenever Progman/WorkerW becomes foreground.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -24,6 +23,7 @@ use windows::core::{IUnknown, PCWSTR};
 use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_CLOAKED,
+    DWMWA_EXCLUDED_FROM_PEEK,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -31,26 +31,39 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
 };
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, FindWindowW, GetClassNameW, GetForegroundWindow,
-    GetWindowLongW, IsIconic, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowLongW,
-    SetWindowPos, ShowWindow,
-    GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    LWA_ALPHA, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WNDPROC,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    CallWindowProcW, FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowLongW, IsIconic, SendMessageTimeoutW, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow,
+    GWL_EXSTYLE, GWL_STYLE, GWLP_HWNDPARENT, GWLP_WNDPROC, HWND_BOTTOM, HWND_NOTOPMOST,
+    HWND_TOP, HWND_TOPMOST, LWA_ALPHA, SMTO_ABORTIFHUNG,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_RESTORE, WNDPROC, WM_APP, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_VISIBLE,
 };
 
-// Cached once the HWND is found (find_hwnd is called frequently).
 static CACHED_HWND: OnceLock<isize> = OnceLock::new();
 static ORIGINAL_WNDPROC: OnceLock<isize> = OnceLock::new();
 static HOOK_INSTALLED: OnceLock<bool> = OnceLock::new();
+// HWINEVENTHOOK wraps a raw pointer and isn't Send/Sync, so we store the
+// raw pointer value as isize instead.
+static WIN_EVENT_HOOK: OnceLock<isize> = OnceLock::new();
 
+const WM_APP_REPARENT: u32 = WM_APP + 1;
 const WM_WINDOWPOSCHANGING: u32 = 0x0046;
+const WM_SYSCOMMAND: u32 = 0x0112;
+const WM_SIZE: u32 = 0x0005;
+const WM_SHOWWINDOW: u32 = 0x0018;
+const SC_MINIMIZE_MASK: usize = 0xFFF0;
+const SC_MINIMIZE_VAL: usize = 0xF020;
+const SWP_HIDEWINDOW_RAW: u32 = 0x0080;
+const EVENT_SYSTEM_FOREGROUND_VAL: u32 = 0x0003;
+const EVENT_SYSTEM_MINIMIZEEND_VAL: u32 = 0x0017;
+const WINEVENT_OUTOFCONTEXT_VAL: u32 = 0x0000;
+const WINEVENT_SKIPOWNPROCESS_VAL: u32 = 0x0002;
 
-/// Win32 WINDOWPOS structure (defined manually because the bindings expose it
-/// behind a feature we don't need elsewhere).
 #[repr(C)]
 struct WindowPos {
     hwnd: HWND,
@@ -66,16 +79,11 @@ fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// Finds (and caches) the HWND of the widget window by title. Returns None
-/// until the window is created by iced.
 pub fn find_hwnd(title: &str) -> Option<isize> {
     if let Some(v) = CACHED_HWND.get() {
         return Some(*v);
     }
-    let wide: Vec<u16> = OsStr::new(title)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide = to_wide(title);
     unsafe {
         match FindWindowW(PCWSTR::null(), PCWSTR(wide.as_ptr())) {
             Ok(hwnd) => {
@@ -92,53 +100,144 @@ pub fn find_hwnd(title: &str) -> Option<isize> {
     }
 }
 
-/// Returns true if the current foreground window is the desktop (Program
-/// Manager or the WorkerW wallpaper host).
-pub fn is_desktop_foreground() -> bool {
+fn find_progman() -> HWND {
     unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground.0.is_null() {
-            return false;
+        let class = to_wide("Progman");
+        if let Ok(h) = FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) {
+            if !h.0.is_null() {
+                return h;
+            }
         }
-        let mut class_buf = [0u16; 128];
-        let len = GetClassNameW(foreground, &mut class_buf);
-        if len <= 0 {
-            return false;
+        let workerw = to_wide("WorkerW");
+        if let Ok(h) = FindWindowW(PCWSTR(workerw.as_ptr()), PCWSTR::null()) {
+            if !h.0.is_null() {
+                return h;
+            }
         }
-        let class = String::from_utf16_lossy(&class_buf[..len as usize]);
-        class == "WorkerW" || class == "Progman"
+        HWND(std::ptr::null_mut())
     }
 }
 
-/// Returns true if the widget itself is the foreground window. Used to skip
-/// z-order manipulation while the user is actively interacting with it.
-pub fn is_window_foreground(hwnd_raw: isize) -> bool {
-    unsafe {
-        let hwnd = HWND(hwnd_raw as *mut _);
-        let fg = GetForegroundWindow();
-        fg == hwnd
+/// Soft reparent: set WS_CHILD and attach owner/parent to Progman via
+/// GWLP_HWNDPARENT. Must run on the window's own thread.
+unsafe fn do_soft_reparent(hwnd: HWND) {
+    let progman = find_progman();
+    if progman.0.is_null() {
+        crate::log::write("soft_reparent: Progman/WorkerW not found");
+        return;
+    }
+
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+    let new_style = (style & !WS_POPUP.0) | WS_CHILD.0 | WS_VISIBLE.0;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, new_style as isize);
+
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, progman.0 as isize);
+
+    let _ = SetWindowPos(
+        hwnd,
+        HWND(std::ptr::null_mut()),
+        0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    );
+    crate::log::write("soft_reparent: OK");
+}
+
+/// WinEvent callback: whenever Progman/WorkerW becomes foreground, re-assert
+/// the widget at the bottom of the z-order so Show Desktop doesn't hide it.
+unsafe extern "system" fn win_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if id_object != 0 || id_child != 0 || event != EVENT_SYSTEM_FOREGROUND_VAL {
+        return;
+    }
+
+    let mut class_buf = [0u16; 128];
+    let len = GetClassNameW(hwnd, &mut class_buf);
+    if len <= 0 {
+        return;
+    }
+    let class = String::from_utf16_lossy(&class_buf[..len as usize]);
+    if class != "Progman" && class != "WorkerW" {
+        return;
+    }
+
+    if let Some(&our_raw) = CACHED_HWND.get() {
+        let our_hwnd = HWND(our_raw as *mut _);
+        let _ = SetWindowPos(
+            our_hwnd,
+            HWND_BOTTOM,
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 
-/// Hook that intercepts minimize-to (-32000, -32000) attempts (Win+D / Show
-/// Desktop) and reinterprets them as "keep in place at HWND_BOTTOM".
-/// Everything else is forwarded to the original WndProc.
+fn install_win_event_hook() {
+    if WIN_EVENT_HOOK.get().is_some() {
+        return;
+    }
+    unsafe {
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND_VAL,
+            EVENT_SYSTEM_MINIMIZEEND_VAL,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT_VAL | WINEVENT_SKIPOWNPROCESS_VAL,
+        );
+        if !hook.0.is_null() {
+            let _ = WIN_EVENT_HOOK.set(hook.0 as isize);
+            crate::log::write("install_win_event_hook: OK");
+        } else {
+            crate::log::write("install_win_event_hook: FAILED");
+        }
+    }
+}
+
 unsafe extern "system" fn window_proc_hook(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // Soft reparent + install WinEvent hook, executed on the window's thread.
+    if msg == WM_APP_REPARENT {
+        do_soft_reparent(hwnd);
+        install_win_event_hook();
+        return LRESULT(0);
+    }
+
+    if msg == WM_SYSCOMMAND {
+        if (wparam.0 & SC_MINIMIZE_MASK) == SC_MINIMIZE_VAL {
+            return LRESULT(0);
+        }
+    }
+
+    if msg == WM_SIZE && wparam.0 == 0 {
+        return LRESULT(0);
+    }
+
+    if msg == WM_SHOWWINDOW && wparam.0 == 0 {
+        return LRESULT(0);
+    }
+
     if msg == WM_WINDOWPOSCHANGING {
         let pos = lparam.0 as *mut WindowPos;
         if !pos.is_null() {
             let x = (*pos).x;
             let y = (*pos).y;
             if x == -32000 && y == -32000 {
-                // Rewrite the request: no move, no size change, keep at bottom.
-                let mut f = SET_WINDOW_POS_FLAGS((*pos).flags);
-                f |= SWP_NOMOVE | SWP_NOSIZE;
-                (*pos).flags = f.0;
+                let mut flags = (*pos).flags;
+                flags &= !SWP_HIDEWINDOW_RAW;
+                flags |= SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_SHOWWINDOW.0;
+                (*pos).flags = flags;
                 (*pos).hwnd_insert_after = HWND_BOTTOM;
                 return LRESULT(0);
             }
@@ -153,7 +252,6 @@ unsafe extern "system" fn window_proc_hook(
     LRESULT(0)
 }
 
-/// Installs the WndProc hook. Idempotent.
 pub fn install_window_proc_hook(hwnd_raw: isize) -> bool {
     if let Some(v) = HOOK_INSTALLED.get() {
         return *v;
@@ -170,13 +268,52 @@ pub fn install_window_proc_hook(hwnd_raw: isize) -> bool {
         let _ = ORIGINAL_WNDPROC.set(original);
         let _ = HOOK_INSTALLED.set(true);
         crate::log::write("install_window_proc_hook: OK");
-        true
+    }
+
+    // Trigger soft reparent (and WinEvent hook install) on the window thread.
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let _ = SendMessageTimeoutW(
+            hwnd,
+            WM_APP_REPARENT,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            5000,
+            None,
+        );
+    }
+
+    // Safety net: exclude the widget from Aero Peek.
+    exclude_from_peek(hwnd_raw);
+
+    true
+}
+
+pub fn is_desktop_foreground() -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return false;
+        }
+        let mut class_buf = [0u16; 128];
+        let len = GetClassNameW(foreground, &mut class_buf);
+        if len <= 0 {
+            return false;
+        }
+        let class = String::from_utf16_lossy(&class_buf[..len as usize]);
+        class == "WorkerW" || class == "Progman"
     }
 }
 
-/// If DWM has cloaked the window (a common after-effect of Show Desktop),
-/// ask it to uncloak. Cloaking hides a window without changing its visibility
-/// state, so it must be handled separately from ShowWindow.
+pub fn is_window_foreground(hwnd_raw: isize) -> bool {
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let fg = GetForegroundWindow();
+        fg == hwnd
+    }
+}
+
 pub fn uncloak_if_needed(hwnd_raw: isize) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
@@ -199,131 +336,99 @@ pub fn uncloak_if_needed(hwnd_raw: isize) {
     }
 }
 
-/// Brings the widget to the very top of the z-order (visible above the
-/// wallpaper). Note: does NOT call SetForegroundWindow, which would steal
-/// focus and cause flicker during the KeepAtBottom loop.
+pub fn exclude_from_peek(hwnd_raw: isize) {
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let val: BOOL = BOOL(0);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_EXCLUDED_FROM_PEEK,
+            &val as *const BOOL as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        );
+    }
+}
+
 pub fn force_show_on_desktop(hwnd_raw: isize) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
-
-        // If minimized, restore first so ShowWindow has an effect.
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-
         uncloak_if_needed(hwnd_raw);
-
         let _ = SetWindowPos(
             hwnd,
             HWND_TOP,
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
         );
-
-        // HWND_TOPMOST here is transient: the KeepAtBottom loop immediately
-        // demotes it back to HWND_NOTOPMOST/HWND_BOTTOM once the desktop is
-        // no longer in the foreground, so it doesn't stay always-on-top.
         let _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
-
         let _ = DwmFlush();
     }
 }
 
-/// Pushes the widget to the bottom of the z-order (behind normal apps, above
-/// the wallpaper). Called on every KeepAtBottom tick when the desktop is NOT
-/// the foreground window.
 pub fn ensure_visible_bottom(hwnd_raw: isize) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
-
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-
         uncloak_if_needed(hwnd_raw);
-
-        // Drop topmost first, then push to bottom. Two calls because
-        // SetWindowPos can't transition TOPMOST -> BOTTOM in one step.
         let _ = SetWindowPos(
             hwnd,
             HWND_NOTOPMOST,
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
         let _ = SetWindowPos(
             hwnd,
             HWND_BOTTOM,
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
     }
 }
 
-/// Adds WS_EX_TOOLWINDOW so the window disappears from taskbar and Alt+Tab,
-/// and WS_EX_LAYERED so SetLayeredWindowAttributes can control alpha.
 pub fn hide_from_taskbar(hwnd_raw: isize) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            (ex_style | (WS_EX_TOOLWINDOW.0 as i32)) | (WS_EX_LAYERED.0 as i32),
-        );
-        // SWP_FRAMECHANGED forces a non-client recompute so the style change
-        // takes effect immediately.
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        // Remove WS_EX_TOOLWINDOW: it blocks WM_WINDOWPOSCHANGING on some
+        // Windows builds, which would defeat the Win+D interception.
+        let new_ex = (ex_style & !WS_EX_APPWINDOW.0 & !WS_EX_TOOLWINDOW.0)
+            | WS_EX_LAYERED.0
+            | WS_EX_NOACTIVATE.0;
+        SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex as i32);
         let _ = SetWindowPos(
             hwnd,
             HWND(std::ptr::null_mut()),
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
 }
 
-/// Removes WS_MAXIMIZEBOX from the window style (decorations are disabled
-/// anyway, this guards against future toggles) and re-enables WS_MINIMIZEBOX.
 pub fn remove_minimize_box(hwnd_raw: isize) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
-        let style = GetWindowLongW(hwnd, GWL_STYLE);
-        let mask = WS_MAXIMIZEBOX.0 as i32;
-        let new_style = (style & !mask) | (WS_MINIMIZEBOX.0 as i32);
-        SetWindowLongW(hwnd, GWL_STYLE, new_style);
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        // Keep WS_MINIMIZEBOX: needed to receive certain system messages.
+        let new_style = (style & !WS_MAXIMIZEBOX.0) | WS_MINIMIZEBOX.0;
+        SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
         let _ = SetWindowPos(
             hwnd,
             HWND(std::ptr::null_mut()),
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
 }
 
-/// Restores a minimized window. Called when a zero-size Resized event is
-/// observed (which happens when Windows minimizes to tray).
 pub fn restore_window(hwnd_raw: isize) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
@@ -331,8 +436,6 @@ pub fn restore_window(hwnd_raw: isize) {
     }
 }
 
-/// Sets the whole-window alpha (0.0 = invisible, 1.0 = opaque). Requires
-/// WS_EX_LAYERED to have been set (see hide_from_taskbar).
 pub fn set_window_alpha(hwnd_raw: isize, alpha: f32) {
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
@@ -341,13 +444,8 @@ pub fn set_window_alpha(hwnd_raw: isize, alpha: f32) {
     }
 }
 
-/// Removes the taskbar tab via ITaskbarList. Complements WS_EX_TOOLWINDOW:
-/// on some Windows builds the shell can recreate the tab (e.g. after toggling
-/// visibility), so we delete it explicitly.
 pub fn delete_taskbar_tab(hwnd_raw: isize) {
     unsafe {
-        // CoInitializeEx is idempotent for the same threading model; safe to
-        // call even if iced already initialized COM.
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let created: windows::core::Result<ITaskbarList> = CoCreateInstance(
             &TaskbarList,
@@ -362,8 +460,6 @@ pub fn delete_taskbar_tab(hwnd_raw: isize) {
     }
 }
 
-/// Reads the "AppsUseLightTheme" registry value to detect dark mode.
-/// Returns true when dark mode is active.
 pub fn system_is_dark() -> bool {
     let subkey = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
     let value = to_wide("AppsUseLightTheme");
@@ -393,7 +489,6 @@ pub fn system_is_dark() -> bool {
         if res.0 != 0 {
             return false;
         }
-        // AppsUseLightTheme = 0 means dark mode.
         data == 0
     }
 }
