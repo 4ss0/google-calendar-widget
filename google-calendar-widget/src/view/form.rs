@@ -1,4 +1,20 @@
 //! Event create/edit form.
+//!
+//! Renders different fields depending on the mode:
+//!   - Create: title, date range, optional time, color, all-day toggle,
+//!     recurrence toggle (frequency / interval / optional until).
+//!   - Edit: same, plus a scope selector when the event is an instance of an
+//!     existing series. The recurrence toggle is also available in Edit for
+//!     plain (non-series) events, so a single event can be turned into a
+//!     recurring one.
+//!   - Delete goes through a two-step confirmation which, for recurring
+//!     instances, also lets the user pick the delete scope.
+//!
+//! Text inputs carry stable IDs so the app-level Tab / Shift+Tab handler can
+//! move focus between them (iced does not implement Tab traversal itself).
+//!
+//! All user-facing strings come from `ui::strings::CURRENT`, which is
+//! resolved once from the OS locale.
 
 use crate::api::colors::ColorPalette;
 use crate::app::{EditScope, EventForm, FormMode, RecurFreq};
@@ -7,9 +23,11 @@ use crate::ui::common::parse_hex_color;
 use crate::ui::strings::CURRENT as S;
 use crate::ui::AppTheme;
 use iced::widget::container::Appearance as ContainerAppearance;
+use iced::widget::text_input::Id as TextInputId;
 use iced::widget::{button, checkbox, column, container, mouse_area, row, text, text_input};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
+/// Small selectable pill used for recurrence frequency and edit/delete scope.
 fn pill<'a>(
     label: &'a str,
     selected: bool,
@@ -35,31 +53,6 @@ fn pill<'a>(
     mouse_area(inner).on_press(on_press).into()
 }
 
-/// Returns a small red "!" when `valid` is false and the field is non-empty,
-/// otherwise a zero-width placeholder so the row doesn't jump.
-fn validation_hint<'a>(valid: bool, empty: bool) -> Element<'a, Message> {
-    if valid || empty {
-        container(text("")).width(Length::Fixed(10.0)).into()
-    } else {
-        container(
-            text("!")
-                .size(13)
-                .style(Color::from_rgb(0.85, 0.25, 0.25)),
-        )
-        .width(Length::Fixed(10.0))
-        .center_x()
-        .into()
-    }
-}
-
-fn date_ok(s: &str) -> bool {
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
-}
-
-fn time_ok(s: &str) -> bool {
-    chrono::NaiveTime::parse_from_str(s, "%H:%M").is_ok()
-}
-
 pub fn view_form<'a>(
     form: &'a EventForm,
     palette: &'a ColorPalette,
@@ -70,44 +63,41 @@ pub fn view_form<'a>(
     let is_create = matches!(form.mode, FormMode::Create);
     let is_recurring_instance = form.recurring_event_id.is_some();
 
+    // The recurrence toggle is shown:
+    //   - in Create mode, to pick a rule while creating a new event;
+    //   - in Edit mode for plain (non-series) events, to convert an existing
+    //     single event into a recurring series.
+    // For instances of an existing series, the scope selector below handles
+    // the different edit meanings and the toggle is hidden.
+    let show_recurrence_controls = is_create || !is_recurring_instance;
+
     let title_label: Element<Message> = text(S.form_title).style(t).into();
     let title_input: Element<Message> = text_input(S.form_title_placeholder, &form.title)
+        .id(TextInputId::new("form_title"))
         .on_input(Message::FormTitleChanged)
         .width(Length::Fill)
         .into();
     let row1: Element<Message> = row(vec![title_label, title_input]).spacing(8).into();
 
-    let start_date_valid = date_ok(&form.date);
-    let end_date_valid = date_ok(&form.end_date);
-    let start_time_valid = time_ok(&form.start_time);
-    let end_time_valid = time_ok(&form.end_time);
-
-    let today_btn: Element<Message> = button(text(S.form_today).size(11))
-        .on_press(Message::FormDateToday)
-        .padding([3, 7])
-        .into();
-
     let start_date_label: Element<Message> = text(S.form_date).style(t).into();
     let start_date_input: Element<Message> = text_input("YYYY-MM-DD", &form.date)
+        .id(TextInputId::new("form_date"))
         .on_input(Message::FormDateChanged)
-        .width(Length::FillPortion(1))
+        .width(Length::Fixed(140.0))
         .into();
     let end_date_label: Element<Message> = text(S.form_end_date).style(t).into();
     let end_date_input: Element<Message> = text_input("YYYY-MM-DD", &form.end_date)
+        .id(TextInputId::new("form_end_date"))
         .on_input(Message::FormEndDateChanged)
-        .width(Length::FillPortion(1))
+        .width(Length::Fixed(140.0))
         .into();
-
     let row2: Element<Message> = row(vec![
         start_date_label,
         start_date_input,
-        validation_hint(start_date_valid, form.date.is_empty()),
-        today_btn,
         end_date_label,
         end_date_input,
-        validation_hint(end_date_valid, form.end_date.is_empty()),
     ])
-    .spacing(6)
+    .spacing(8)
     .into();
 
     let all_day_box: Element<Message> = checkbox(S.form_all_day, form.all_day)
@@ -115,38 +105,32 @@ pub fn view_form<'a>(
         .into();
     let row2b: Element<Message> = row(vec![all_day_box]).spacing(8).into();
 
+    // Time inputs are hidden for all-day events.
     let row3: Element<Message> = if form.all_day {
         row(vec![]).spacing(0).into()
     } else {
-        let now_btn: Element<Message> = button(text(S.form_now).size(11))
-            .on_press(Message::FormStartNow)
-            .padding([3, 7])
-            .into();
         let start_label: Element<Message> = text(S.form_start).style(t).into();
         let start_input: Element<Message> = text_input("HH:MM", &form.start_time)
+            .id(TextInputId::new("form_start_time"))
             .on_input(Message::FormStartChanged)
-            .width(Length::FillPortion(1))
+            .width(Length::Fixed(90.0))
             .into();
         let end_label: Element<Message> = text(S.form_end).style(t).into();
         let end_input: Element<Message> = text_input("HH:MM", &form.end_time)
+            .id(TextInputId::new("form_end_time"))
             .on_input(Message::FormEndChanged)
-            .width(Length::FillPortion(1))
+            .width(Length::Fixed(90.0))
             .into();
-        row(vec![
-            start_label,
-            start_input,
-            validation_hint(start_time_valid, form.start_time.is_empty()),
-            now_btn,
-            end_label,
-            end_input,
-            validation_hint(end_time_valid, form.end_time.is_empty()),
-        ])
-        .spacing(6)
-        .into()
+        row(vec![start_label, start_input, end_label, end_input])
+            .spacing(8)
+            .into()
     };
 
     let color_label: Element<Message> = text(S.form_color).style(t).into();
 
+    // Color swatches, sorted numerically by id ("1".."11"). Sizes and
+    // spacing are kept small so the whole row fits in the minimum window
+    // width (360px) without overflow.
     let mut sorted_ids: Vec<String> = palette.event_colors.keys().cloned().collect();
     sorted_ids.sort_by_key(|s| s.parse::<u32>().unwrap_or(0));
 
@@ -158,6 +142,7 @@ pub fn view_form<'a>(
             .and_then(parse_hex_color)
             .unwrap_or(Color::from_rgb(0.8, 0.8, 0.8));
         let is_selected = form.color_id == *id;
+        // Selected swatch gets a thicker, dark border.
         let border_color = if is_selected { theme.text } else { Color::TRANSPARENT };
         let border_width = if is_selected { 2.0 } else { 1.0 };
 
@@ -184,6 +169,7 @@ pub fn view_form<'a>(
         color_row_items.push(swatch);
     }
 
+    // "X" clears the color (falls back to default gray in the renderer).
     let clear_btn: Element<Message> = button(text("X").size(11))
         .on_press(Message::FormColorChanged(String::new()))
         .padding([2, 5])
@@ -206,14 +192,10 @@ pub fn view_form<'a>(
 
     let mut actions: Vec<Element<Message>> = vec![save_btn, cancel_btn];
 
+    // Delete is only available in edit mode and until the user confirms it.
     if matches!(form.mode, FormMode::Edit(_)) && !form.confirm_delete {
         if saving {
-            actions.push(
-                text(S.form_operation_in_progress)
-                    .size(13)
-                    .style(t)
-                    .into(),
-            );
+            actions.push(text(S.form_operation_in_progress).size(13).style(t).into());
         } else {
             let del_btn: Element<Message> = button(S.form_delete)
                 .on_press(Message::RequestDeleteEvent)
@@ -226,10 +208,13 @@ pub fn view_form<'a>(
 
     let mut rows: Vec<Element<Message>> = Vec::new();
 
+    // Scope selector: shown for instances of a recurring series while editing
+    // (not while confirming a deletion, which has its own scope row below).
     if is_recurring_instance && !form.confirm_delete {
         let surface_alt = theme.surface_alt;
         let border_light = theme.border_light;
-        let scope_label: Element<Message> = text(S.form_apply_to).size(12).style(t).into();
+        let scope_label: Element<Message> =
+            text(S.form_apply_to).size(12).style(t).into();
         let mut items: Vec<Element<Message>> = vec![scope_label];
         for scope in EditScope::all() {
             let selected = form.edit_scope == scope;
@@ -265,7 +250,9 @@ pub fn view_form<'a>(
     }
     rows.push(row4);
 
-    if is_create {
+    // Recurrence controls: visible in Create, and in Edit for non-series
+    // events (to allow converting a single event into a recurring series).
+    if show_recurrence_controls {
         let recur_box: Element<Message> = checkbox(S.form_recurring, form.recurring)
             .on_toggle(Message::FormRecurringToggled)
             .into();
@@ -289,6 +276,7 @@ pub fn view_form<'a>(
                 text(S.form_interval).size(12).style(t).into();
             let interval_input: Element<Message> =
                 text_input("1", &form.recur_interval)
+                    .id(TextInputId::new("form_recur_interval"))
                     .on_input(Message::FormRecurIntervalChanged)
                     .width(Length::Fixed(60.0))
                     .into();
@@ -296,6 +284,7 @@ pub fn view_form<'a>(
                 text(S.form_until).size(12).style(t).into();
             let until_input: Element<Message> =
                 text_input("YYYY-MM-DD", &form.recur_until)
+                    .id(TextInputId::new("form_recur_until"))
                     .on_input(Message::FormRecurUntilChanged)
                     .width(Length::Fixed(140.0))
                     .into();
@@ -307,8 +296,10 @@ pub fn view_form<'a>(
         }
     }
 
+    // Confirmation prompt when the user tries to save an event with no title.
     if form.confirm_empty_title && !saving {
-        let warn: Element<Message> = text(S.form_empty_title).size(13).style(t).into();
+        let warn: Element<Message> =
+            text(S.form_empty_title).size(13).style(t).into();
         let yes: Element<Message> = button(S.form_yes_save)
             .on_press(Message::ConfirmEmptyTitle)
             .into();
@@ -318,10 +309,12 @@ pub fn view_form<'a>(
         rows.push(row(vec![warn, yes, no]).spacing(8).into());
     }
 
+    // Delete confirmation: for recurring instances, offers the scope selector.
     if form.confirm_delete && !saving {
         let surface_alt = theme.surface_alt;
         let border_light = theme.border_light;
-        let warn: Element<Message> = text(S.form_confirm_delete).size(13).style(t).into();
+        let warn: Element<Message> =
+            text(S.form_confirm_delete).size(13).style(t).into();
 
         let mut confirm_row_items: Vec<Element<Message>> = Vec::new();
 
@@ -379,6 +372,7 @@ pub fn view_form<'a>(
     let border = theme.form_border;
     let text_color = theme.text;
 
+    // Whole form sits in a rounded card.
     container(column(rows).spacing(8))
         .padding(10)
         .style(move |_theme: &Theme| ContainerAppearance {

@@ -118,17 +118,20 @@ impl App {
         let refresh_token = self.refresh_token.clone();
         let expires_at = self.expires_at;
 
-        let start_date = match chrono::NaiveDate::parse_from_str(&form.date, "%Y-%m-%d") {
-            Ok(d) => d,
-            Err(_) => {
-                self.last_error = Some("Invalid start date (YYYY-MM-DD)".into());
+        // Dates and times accept both the extended (YYYY-MM-DD, HH:MM) and the
+        // compact (YYYYMMDD, HHMM) formats, so users who touch-type digits
+        // don't have to insert separators.
+        let start_date = match parse_date_flexible(&form.date) {
+            Some(d) => d,
+            None => {
+                self.last_error = Some("Invalid start date (YYYY-MM-DD or YYYYMMDD)".into());
                 return None;
             }
         };
-        let end_date = match chrono::NaiveDate::parse_from_str(&form.end_date, "%Y-%m-%d") {
-            Ok(d) => d,
-            Err(_) => {
-                self.last_error = Some("Invalid end date (YYYY-MM-DD)".into());
+        let end_date = match parse_date_flexible(&form.end_date) {
+            Some(d) => d,
+            None => {
+                self.last_error = Some("Invalid end date (YYYY-MM-DD or YYYYMMDD)".into());
                 return None;
             }
         };
@@ -142,17 +145,17 @@ impl App {
                 .unwrap();
             (local_to_utc(s_naive), local_to_utc(e_naive))
         } else {
-            let start_time = match NaiveTime::parse_from_str(&form.start_time, "%H:%M") {
-                Ok(t) => t,
-                Err(_) => {
-                    self.last_error = Some("Invalid start time (HH:MM)".into());
+            let start_time = match parse_time_flexible(&form.start_time) {
+                Some(t) => t,
+                None => {
+                    self.last_error = Some("Invalid start time (HH:MM or HHMM)".into());
                     return None;
                 }
             };
-            let end_time = match NaiveTime::parse_from_str(&form.end_time, "%H:%M") {
-                Ok(t) => t,
-                Err(_) => {
-                    self.last_error = Some("Invalid end time (HH:MM)".into());
+            let end_time = match parse_time_flexible(&form.end_time) {
+                Some(t) => t,
+                None => {
+                    self.last_error = Some("Invalid end time (HH:MM or HHMM)".into());
                     return None;
                 }
             };
@@ -185,64 +188,67 @@ impl App {
             return None;
         }
 
-        // RRULE is only built on create. Edits never touch the recurrence rule
-        // itself; if the user wants to change the rule they delete and re-create.
-        let recurrence: Option<Vec<String>> =
-            if matches!(form.mode, FormMode::Create) && form.recurring {
-                let interval = form
-                    .recur_interval
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|&n| n >= 1)
-                    .unwrap_or(1);
-                let mut rrule = format!(
-                    "RRULE:FREQ={};INTERVAL={}",
-                    form.recur_freq.rrule_name(),
-                    interval
-                );
-                let until = form.recur_until.trim();
-                if !until.is_empty() {
-                    match chrono::NaiveDate::parse_from_str(until, "%Y-%m-%d") {
-                        Ok(d) => {
-                            // The recurrence end must not be before the
-                            // event's own start date, otherwise the RRULE is
-                            // meaningless (Google rejects it with HTTP 400,
-                            // or produces an empty series).
-                            if d < start_date {
-                                self.last_error = Some(
-                                    "Recurrence end date must be on or after the event start date"
-                                        .into(),
-                                );
-                                return None;
-                            }
-                            // UNTIL format depends on whether DTSTART is a DATE
-                            // (all-day) or DATE-TIME (timed). For timed events
-                            // UNTIL must be a UTC instant: converting the local
-                            // end-of-day avoids off-by-one inclusion/exclusion
-                            // for non-UTC timezones.
-                            if form.all_day {
-                                rrule.push_str(&format!(";UNTIL={}", d.format("%Y%m%d")));
-                            } else {
-                                let local_end_naive = d.and_hms_opt(23, 59, 59).unwrap();
-                                let until_utc = local_to_utc(local_end_naive);
-                                rrule.push_str(&format!(
-                                    ";UNTIL={}",
-                                    until_utc.format("%Y%m%dT%H%M%SZ")
-                                ));
-                            }
-                        }
-                        Err(_) => {
-                            self.last_error =
-                                Some("Invalid recurrence end date (YYYY-MM-DD)".into());
+        // The recurrence rule is built whenever the user asked for recurrence
+        // (checkbox on), regardless of Create vs Edit mode. When editing a
+        // non-recurring event, this converts it to a recurring series. When
+        // editing an instance of an existing series, the checkbox is hidden
+        // by the UI, so `form.recurring` is false and this branch is skipped.
+        let recurrence: Option<Vec<String>> = if form.recurring {
+            let interval = form
+                .recur_interval
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| n >= 1)
+                .unwrap_or(1);
+            let mut rrule = format!(
+                "RRULE:FREQ={};INTERVAL={}",
+                form.recur_freq.rrule_name(),
+                interval
+            );
+            let until = form.recur_until.trim();
+            if !until.is_empty() {
+                match parse_date_flexible(until) {
+                    Some(d) => {
+                        // The recurrence end must not be before the event's
+                        // own start date, otherwise the RRULE is meaningless
+                        // (Google rejects it with HTTP 400, or produces an
+                        // empty series).
+                        if d < start_date {
+                            self.last_error = Some(
+                                "Recurrence end date must be on or after the event start date"
+                                    .into(),
+                            );
                             return None;
                         }
+                        // UNTIL format depends on whether DTSTART is a DATE
+                        // (all-day) or DATE-TIME (timed). For timed events
+                        // UNTIL must be a UTC instant: converting the local
+                        // end-of-day avoids off-by-one inclusion/exclusion
+                        // for non-UTC timezones.
+                        if form.all_day {
+                            rrule.push_str(&format!(";UNTIL={}", d.format("%Y%m%d")));
+                        } else {
+                            let local_end_naive = d.and_hms_opt(23, 59, 59).unwrap();
+                            let until_utc = local_to_utc(local_end_naive);
+                            rrule.push_str(&format!(
+                                ";UNTIL={}",
+                                until_utc.format("%Y%m%dT%H%M%SZ")
+                            ));
+                        }
+                    }
+                    None => {
+                        self.last_error = Some(
+                            "Invalid recurrence end date (YYYY-MM-DD or YYYYMMDD)".into(),
+                        );
+                        return None;
                     }
                 }
-                Some(vec![rrule])
-            } else {
-                None
-            };
+            }
+            Some(vec![rrule])
+        } else {
+            None
+        };
 
         let title = form.title.clone();
         let color_id = if form.color_id.is_empty() {
@@ -255,6 +261,11 @@ impl App {
         let scope = form.edit_scope;
         let recurring_event_id = form.recurring_event_id.clone();
         let original_start = form.original_start;
+
+        crate::log::write(&format!(
+            "save: mode={:?} title={:?} start={} end={} all_day={} recurring={}",
+            mode, title, start_utc, end_utc, all_day, recurrence.is_some()
+        ));
 
         Some(Command::perform(
             run_with_token(
@@ -323,14 +334,19 @@ impl App {
                                 .await
                                 .map(|_| ())
                             } else {
-                                // OnlyThis or non-recurring: PATCH the instance.
-                                let input = EventInput::new(
-                                    &title,
-                                    start_utc,
-                                    end_utc,
-                                    color_id.as_deref(),
+                                // OnlyThis, or a non-recurring event. In this
+                                // branch `recurrence` may be Some(...) when
+                                // the user turned on the "Recurring" checkbox
+                                // while editing a plain event, converting it
+                                // into a series.
+                                let input = EventInput {
+                                    summary: &title,
+                                    start: start_utc,
+                                    end: end_utc,
+                                    color_id: color_id.as_deref(),
                                     all_day,
-                                );
+                                    recurrence,
+                                };
                                 crate::api::client::update_event(
                                     &access,
                                     &calendar_id,
@@ -524,6 +540,8 @@ impl App {
                 expires_at,
                 refresh_token,
                 move |access| async move {
+                    // Moving a single occurrence never touches recurrence, so
+                    // we pass None and Google leaves the rule alone.
                     let input =
                         EventInput::new(&summary, new_start, new_end, color_id.as_deref(), all_day);
                     crate::api::client::update_event(
@@ -576,6 +594,36 @@ where
     };
     let result = f(access).await;
     ApiResult { new_token, result }
+}
+
+/// Parses a date string, accepting both the extended `YYYY-MM-DD` format and
+/// the compact `YYYYMMDD` format. Whitespace is trimmed.
+fn parse_date_flexible(s: &str) -> Option<NaiveDate> {
+    let s = s.trim();
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(d);
+    }
+    if s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit()) {
+        if let Ok(d) = NaiveDate::parse_from_str(s, "%Y%m%d") {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// Parses a time string, accepting both the extended `HH:MM` format and the
+/// compact `HHMM` format. Whitespace is trimmed.
+fn parse_time_flexible(s: &str) -> Option<NaiveTime> {
+    let s = s.trim();
+    if let Ok(t) = NaiveTime::parse_from_str(s, "%H:%M") {
+        return Some(t);
+    }
+    if s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit()) {
+        if let Ok(t) = NaiveTime::parse_from_str(s, "%H%M") {
+            return Some(t);
+        }
+    }
+    None
 }
 
 /// Converts a naive local datetime to UTC.
@@ -704,5 +752,43 @@ mod tests {
             end_local.date_naive(),
             chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()
         );
+    }
+
+    #[test]
+    fn parse_date_accepts_extended_and_compact() {
+        assert_eq!(
+            parse_date_flexible("2026-11-25"),
+            NaiveDate::from_ymd_opt(2026, 11, 25)
+        );
+        assert_eq!(
+            parse_date_flexible("20261125"),
+            NaiveDate::from_ymd_opt(2026, 11, 25)
+        );
+        assert_eq!(
+            parse_date_flexible("  20261125  "),
+            NaiveDate::from_ymd_opt(2026, 11, 25)
+        );
+        assert_eq!(parse_date_flexible(""), None);
+        assert_eq!(parse_date_flexible("abcd"), None);
+        assert_eq!(parse_date_flexible("2026-13-01"), None);
+    }
+
+    #[test]
+    fn parse_time_accepts_extended_and_compact() {
+        assert_eq!(
+            parse_time_flexible("17:30"),
+            NaiveTime::from_hms_opt(17, 30, 0)
+        );
+        assert_eq!(
+            parse_time_flexible("1730"),
+            NaiveTime::from_hms_opt(17, 30, 0)
+        );
+        assert_eq!(
+            parse_time_flexible("0000"),
+            NaiveTime::from_hms_opt(0, 0, 0)
+        );
+        assert_eq!(parse_time_flexible(""), None);
+        assert_eq!(parse_time_flexible("2500"), None);
+        assert_eq!(parse_time_flexible("17:30:00"), None);
     }
 }

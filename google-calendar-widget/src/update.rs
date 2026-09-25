@@ -1,5 +1,23 @@
 //! Elm-style update function: maps each Message to a state transition and,
 //! optionally, a Command (async side effect).
+//!
+//! The state machine is a flat match on the Message variant. Anything that
+//! touches the disk, network, or Win32 APIs is dispatched as a Command so the
+//! UI thread never blocks.
+//!
+//! Several invariants matter here:
+//!   - `started_minimized`: initial startup must hide the window after the
+//!     first frame, but only if the window hasn't already been revealed by
+//!     the first successful fetch.
+//!   - `pending_window_save`: debounces geometry writes during live resizes.
+//!   - `pending_undo`: uses a monotonic nonce so a stale UndoExpired timer
+//!     can't dismiss a fresh undo.
+//!   - `form_focus`: tracks the index of the field the user is currently
+//!     editing, so Tab / Shift+Tab advance from the correct position even
+//!     after the user clicks a field manually. The index is refreshed on
+//!     every FormXChanged message (i.e. whenever the user types in a field).
+//!   - The KeepAtBottom tick is a no-op while the widget is focused, to avoid
+//!     flicker while the user interacts with it.
 
 use crate::app::{App, AppState, DragState, EditScope, EventIndex, FormMode, PendingUndo, RecurFreq};
 use crate::messages::Message;
@@ -12,8 +30,12 @@ use tray_icon::TrayIconEvent;
 
 const MIN_WINDOW_ALPHA: f32 = 0.55;
 const UNDO_WINDOW_SECS: u64 = 8;
+/// Squared distance (in pixels^2) after which a press becomes a drag.
 const DRAG_THRESHOLD_SQ: f32 = 36.0;
 
+/// Reapplies Win32 window effects at several delays after a visibility change,
+/// because some effects (taskbar tab, alpha) can be overwritten by the OS
+/// during the transition.
 fn schedule_win_effects() -> Command<Message> {
     Command::batch(vec![
         Command::perform(
@@ -48,7 +70,14 @@ fn apply_win_effects(alpha: f32) {
     }
 }
 
+/// Focus helper: returns a Command that focuses the given text_input ID.
+/// Used to implement Tab navigation and initial field focusing.
+fn focus_field(id: &iced::widget::text_input::Id) -> Command<Message> {
+    iced::widget::text_input::focus(id.clone())
+}
+
 impl App {
+    /// Shows the window and reapplies the desktop-widget effects.
     pub fn show_window_with_effects() -> Command<Message> {
         let show = iced::window::change_mode(
             iced::window::Id::MAIN,
@@ -57,9 +86,53 @@ impl App {
         Command::batch(vec![show, schedule_win_effects()])
     }
 
+    /// Refreshes `form_focus` to the index of the given field so that Tab /
+    /// Shift+Tab advance from the field the user is actually editing, even
+    /// when focus was moved by a click.
+    ///
+    /// This is called from every FormXChanged handler, i.e. every time the
+    /// user types in a field. If the user clicks a field but types nothing
+    /// and presses Tab immediately, the counter may still be stale, but
+    /// in practice editing always involves typing.
+        fn sync_form_focus(&mut self, field_id: &'static str) {
+        let ids = match &self.form {
+            Some(form) => crate::app::visible_form_field_ids(form),
+            None => return,
+        };
+        let target = iced::widget::text_input::Id::new(field_id);
+        if let Some(idx) = ids.iter().position(|id| *id == target) {
+            self.form_focus = idx;
+        }
+    }
+
+    /// Moves the Tab cursor by `delta` (+1 for Tab, -1 for Shift+Tab) and
+    /// focuses the resulting field. The list of fields is recomputed every
+    /// time so structural changes (all_day, recurring) are honored.
+    fn tab_form_field(&mut self, delta: i32) -> Command<Message> {
+        let ids = match &self.form {
+            Some(form) => crate::app::visible_form_field_ids(form),
+            None => return Command::none(),
+        };
+        if ids.is_empty() {
+            return Command::none();
+        }
+        let len = ids.len() as i32;
+        // Clamp the current cursor into range (it might be stale after a
+        // structural change), then advance.
+        let cur = (self.form_focus as i32).rem_euclid(len);
+        let next = (cur + delta).rem_euclid(len) as usize;
+        self.form_focus = next;
+        focus_field(&ids[next])
+    }
+
     pub fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::WindowResized(size) => {
+                // A (0,0) resize means the OS minimized the window to the
+                // tray (or similar). Restore it and return immediately:
+                // treating (0,0) as a real size would corrupt the layout
+                // (width 0 => Day view) and could persist a zero-sized
+                // window to disk on the next debounced save.
                 if size.width == 0.0 && size.height == 0.0 {
                     #[cfg(target_os = "windows")]
                     if let Some(hwnd) =
@@ -70,6 +143,7 @@ impl App {
                     return Command::none();
                 }
                 self.window_size = size;
+                // Menu is only used in narrow layout.
                 if size.width >= 800.0 {
                     self.menu_open = false;
                 }
@@ -77,6 +151,8 @@ impl App {
             }
             Message::WindowMoved(pos) => {
                 self.window_position = pos;
+                // From this point on we know the real position, so we can
+                // safely persist it (and later restore it by pixel).
                 self.window_position_known = true;
                 self.schedule_window_save()
             }
@@ -88,6 +164,8 @@ impl App {
                 Command::none()
             }
             Message::WindowFocused => {
+                // Refetch on focus, but throttled to once per 3 seconds to
+                // avoid hammering the API when the user alt-tabs quickly.
                 if !matches!(self.state, AppState::Ready { .. }) {
                     return Command::none();
                 }
@@ -104,6 +182,8 @@ impl App {
             }
             Message::CursorMoved(pos) => {
                 self.last_cursor = pos;
+                // Promote a pending press to a drag once the cursor has moved
+                // far enough. Below the threshold it's treated as a click.
                 if let Some(d) = &mut self.drag {
                     if !d.moved {
                         let dx = pos.x - d.press_pos.x;
@@ -113,11 +193,12 @@ impl App {
                         }
                     }
                 }
+                // Bottom-right resize handle: adjust window size directly.
                 if let Some((sx, sy, start_size)) = self.resize_start {
                     let dw = pos.x - sx;
                     let dh = pos.y - sy;
                     let new_w = (start_size.width + dw).max(360.0);
-                    let new_h = (start_size.height + dh).max(480.0);
+                    let new_h = (start_size.height + dh).max(420.0);
                     self.window_size = Size::new(new_w, new_h);
                     return iced::window::resize(iced::window::Id::MAIN, Size::new(new_w, new_h));
                 }
@@ -131,12 +212,15 @@ impl App {
             Message::GlobalLeftUp => {
                 let mut cmds: Vec<Command<Message>> = Vec::new();
 
+                // Finish a resize, if any, and persist geometry immediately.
                 if self.resize_start.is_some() {
                     self.resize_start = None;
                     self.pending_window_save = false;
                     self.persist_geometry();
                 }
 
+                // Terminate a drag: either commit a move or open the edit form
+                // (if the press never moved past the threshold = it was a click).
                 if let Some(drag) = self.drag.take() {
                     let target = self.hover_date.take();
                     if drag.moved {
@@ -215,6 +299,8 @@ impl App {
                 Command::none()
             }
             Message::ApplyWindowEffects => {
+                // The HWND is now available: install the WndProc hook, then
+                // (optionally) start the hide timer if launched minimized.
                 #[cfg(target_os = "windows")]
                 if let Some(hwnd) =
                     crate::platform::windows::find_hwnd("Google Calendar Widget")
@@ -239,6 +325,11 @@ impl App {
                 Command::none()
             }
             Message::HideOnStartup => {
+                // If the window has already been revealed (typically because
+                // the initial fetch completed before this timer fired), do
+                // nothing: `reveal_window` cleared `started_minimized`, and
+                // hiding now would contradict the widget's intended behavior
+                // of staying visible on the desktop.
                 if !self.started_minimized {
                     return Command::none();
                 }
@@ -247,7 +338,33 @@ impl App {
                     iced::window::Mode::Hidden,
                 )
             }
+            Message::KeepAtBottom => {
+                #[cfg(target_os = "windows")]
+                if let Some(hwnd) = crate::platform::windows::find_hwnd("Google Calendar Widget") {
+                    // Do nothing while the user is actively interacting with
+                    // the widget: any z-order change here would steal focus
+                    // and cause a flicker.
+                    if crate::platform::windows::is_window_foreground(hwnd) {
+                        return Command::none();
+                    }
+
+                    let is_desktop = crate::platform::windows::is_desktop_foreground();
+                    let was = self.last_desktop_foreground;
+                    self.last_desktop_foreground = is_desktop;
+
+                    if is_desktop {
+                        if !was {
+                            crate::log::write("keep_at_bottom: desktop mode -> force_show");
+                        }
+                        crate::platform::windows::force_show_on_desktop(hwnd);
+                    } else {
+                        crate::platform::windows::ensure_visible_bottom(hwnd);
+                    }
+                }
+                Command::none()
+            }
             Message::TokenPolled(Ok(token)) => {
+                // Persist a rotated refresh token, then kick off the first fetch.
                 if let Some(rt) = &token.refresh_token {
                     let _ = crate::auth::oauth::save_refresh_token(rt);
                     self.refresh_token = Some(rt.clone());
@@ -303,6 +420,7 @@ impl App {
                 self.refetch()
             }
             Message::OpenCreateForm => {
+                // Prefill with "now" for convenience.
                 let now = chrono::Local::now();
                 let date = self.selected.format("%Y-%m-%d").to_string();
                 let start = now.format("%H:%M").to_string();
@@ -327,12 +445,16 @@ impl App {
                     confirm_empty_title: false,
                     empty_title_confirmed: false,
                 });
+                self.form_focus = 0;
                 self.saving = false;
                 self.last_error = None;
                 self.form_source_event = None;
-                Command::none()
+                // Focus the title field so the user can start typing right away.
+                focus_field(&iced::widget::text_input::Id::new("form_title"))
             }
             Message::OpenCreateFormForDate(date) => {
+                // If the user clicked today, prefill with "now". For other
+                // days, prefill 09:00-10:00 which is what most users want.
                 let today = chrono::Local::now().date_naive();
                 let (start, end) = if date == today {
                     let now = chrono::Local::now();
@@ -364,10 +486,11 @@ impl App {
                     confirm_empty_title: false,
                     empty_title_confirmed: false,
                 });
+                self.form_focus = 0;
                 self.saving = false;
                 self.last_error = None;
                 self.form_source_event = None;
-                Command::none()
+                focus_field(&iced::widget::text_input::Id::new("form_title"))
             }
             Message::OpenEditForm(event) => {
                 crate::log::write(&format!(
@@ -380,6 +503,8 @@ impl App {
                     .unwrap_or(event.start + chrono::Duration::hours(1))
                     .with_timezone(&chrono::Local);
 
+                // For all-day events the API's end is exclusive: convert back
+                // to an inclusive end date for the form.
                 let (date_s, end_date_s, time_s, time_e) = if event.all_day {
                     let sd = start_local.date_naive();
                     let ed = end_local.date_naive();
@@ -412,6 +537,9 @@ impl App {
                     end_time: time_e,
                     color_id: event.color_id.clone().unwrap_or_default(),
                     all_day: event.all_day,
+                    // The user may turn a plain event into a recurring one by
+                    // ticking the checkbox; for a series instance the checkbox
+                    // is hidden by the UI and this stays false.
                     recurring: false,
                     recur_freq: RecurFreq::Weekly,
                     recur_interval: "1".to_string(),
@@ -423,16 +551,19 @@ impl App {
                     confirm_empty_title: false,
                     empty_title_confirmed: false,
                 });
+                self.form_focus = 0;
                 self.saving = false;
                 self.last_error = None;
                 self.form_source_event = Some(event);
-                Command::none()
+                focus_field(&iced::widget::text_input::Id::new("form_title"))
             }
             Message::CloseForm => {
+                // Ignore close while an API call is in flight.
                 if self.saving {
                     return Command::none();
                 }
                 self.form = None;
+                self.form_focus = 0;
                 self.last_error = None;
                 self.form_source_event = None;
                 Command::none()
@@ -440,36 +571,44 @@ impl App {
             Message::FormTitleChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.title = s;
+                    // Any edit resets both the prompt and the explicit
+                    // confirmation: the user must decide again.
                     f.confirm_empty_title = false;
                     f.empty_title_confirmed = false;
                 }
+                self.sync_form_focus("form_title");
                 Command::none()
             }
             Message::FormDateChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.date = s.clone();
+                    // Keep the end date >= start date.
                     if f.end_date.is_empty() || f.end_date < s {
                         f.end_date = s;
                     }
                 }
+                self.sync_form_focus("form_date");
                 Command::none()
             }
             Message::FormEndDateChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.end_date = s;
                 }
+                self.sync_form_focus("form_end_date");
                 Command::none()
             }
             Message::FormStartChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.start_time = s;
                 }
+                self.sync_form_focus("form_start_time");
                 Command::none()
             }
             Message::FormEndChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.end_time = s;
                 }
+                self.sync_form_focus("form_end_time");
                 Command::none()
             }
             Message::FormColorChanged(s) => {
@@ -482,12 +621,17 @@ impl App {
                 if let Some(f) = &mut self.form {
                     f.all_day = b;
                 }
+                // The set of visible fields changed (time inputs disappear);
+                // reset the Tab cursor so it doesn't point past the end.
+                self.form_focus = 0;
                 Command::none()
             }
             Message::FormRecurringToggled(b) => {
                 if let Some(f) = &mut self.form {
                     f.recurring = b;
                 }
+                // Recurrence inputs appear/disappear; reset the Tab cursor.
+                self.form_focus = 0;
                 Command::none()
             }
             Message::FormRecurFreqChanged(freq) => {
@@ -500,12 +644,14 @@ impl App {
                 if let Some(f) = &mut self.form {
                     f.recur_interval = s;
                 }
+                self.sync_form_focus("form_recur_interval");
                 Command::none()
             }
             Message::FormRecurUntilChanged(s) => {
                 if let Some(f) = &mut self.form {
                     f.recur_until = s;
                 }
+                self.sync_form_focus("form_recur_until");
                 Command::none()
             }
             Message::FormEditScopeChanged(scope) => {
@@ -514,7 +660,11 @@ impl App {
                 }
                 Command::none()
             }
+            Message::FormTabNext => self.tab_form_field(1),
+            Message::FormTabPrev => self.tab_form_field(-1),
             Message::ConfirmEmptyTitle => {
+                // The user explicitly answered "Yes, save" to the empty
+                // title prompt. Record the confirmation and retry the save.
                 if let Some(f) = &mut self.form {
                     f.empty_title_confirmed = true;
                     f.confirm_empty_title = false;
@@ -528,9 +678,17 @@ impl App {
                 Command::none()
             }
             Message::SaveEvent => {
+                // Ignore Enter / Save when no form is open.
+                if self.form.is_none() {
+                    return Command::none();
+                }
                 if self.saving {
                     return Command::none();
                 }
+                // First Save with an empty title shows a confirmation row
+                // instead of proceeding. `empty_title_confirmed` is set only
+                // by the "Yes, save" button, so clicking Save twice cannot
+                // bypass the prompt.
                 let needs_confirm = self
                     .form
                     .as_ref()
@@ -583,6 +741,7 @@ impl App {
                 match api_result.result {
                     Ok(()) => {
                         self.form = None;
+                        self.form_focus = 0;
                         self.last_error = None;
                         self.form_source_event = None;
                         self.refetch()
@@ -600,6 +759,10 @@ impl App {
                     Ok(()) => {
                         let mut cmds: Vec<Command<Message>> = vec![self.refetch()];
 
+                        // The undo banner is offered only for non-recurring
+                        // events. Recreating a deleted instance of a series
+                        // would produce a standalone event, not restore the
+                        // original exception in the series, so we skip it.
                         let undoable = self
                             .form
                             .as_ref()
@@ -611,6 +774,7 @@ impl App {
                                 let nonce = self.next_undo_nonce;
                                 self.next_undo_nonce += 1;
                                 self.pending_undo = Some(PendingUndo { event: ev, nonce });
+                                // Auto-dismiss timer.
                                 cmds.push(Command::perform(
                                     async move {
                                         tokio::time::sleep(std::time::Duration::from_secs(
@@ -627,6 +791,7 @@ impl App {
                         }
 
                         self.form = None;
+                        self.form_focus = 0;
                         self.last_error = None;
                         Command::batch(cmds)
                     }
@@ -649,6 +814,7 @@ impl App {
                 }
             }
             Message::UndoExpired(nonce) => {
+                // Only dismiss if the pending undo hasn't been replaced.
                 if let Some(p) = &self.pending_undo {
                     if p.nonce == nonce {
                         self.pending_undo = None;
@@ -684,6 +850,8 @@ impl App {
                 Command::none()
             }
             Message::EventMouseDown { event, source_date } => {
+                // Register a potential drag; it becomes a real drag only if
+                // the cursor moves past DRAG_THRESHOLD (see CursorMoved).
                 self.drag = Some(DragState {
                     event,
                     source_date,
@@ -717,6 +885,7 @@ impl App {
                 iced::window::close(iced::window::Id::MAIN)
             }
             Message::Reauthenticate => {
+                // Clear local tokens and restart the full OAuth flow.
                 crate::auth::oauth::delete_refresh_token();
                 self.access_token = None;
                 self.refresh_token = None;
@@ -771,6 +940,7 @@ impl App {
                 }
             }
             Message::AutoRetryTick => {
+                // Only acts in Error state and when no retry is in flight.
                 if !matches!(self.state, AppState::Error(_)) {
                     return Command::none();
                 }
@@ -805,6 +975,8 @@ impl App {
                 Command::none()
             }
             Message::PollTray => {
+                // tray-icon receivers are not Send, so we poll them.
+                // A click on the tray icon (not the menu) also shows the window.
                 if TrayIconEvent::receiver().try_recv().is_ok() {
                     return Self::show_window_with_effects();
                 }
@@ -868,6 +1040,8 @@ impl App {
                         self.setup_form.error = None;
                         self.refresh_token = None;
 
+                        // Force a fresh OAuth flow: the previous token (if any)
+                        // belongs to a different Google app.
                         crate::auth::oauth::delete_refresh_token();
 
                         let client_id = self.config.client_id.clone();
@@ -902,6 +1076,8 @@ impl App {
                 }
             }
             Message::SetupReconfigure => {
+                // Open the setup wizard from a running session. The previous
+                // state is stashed so Cancel can restore it.
                 self.setup_form = crate::app::SetupForm {
                     client_id: self.config.client_id.clone(),
                     client_secret: self.config.client_secret.clone(),
@@ -919,31 +1095,12 @@ impl App {
                 }
                 Command::none()
             }
-            Message::FormDateToday => {
-                if let Some(f) = &mut self.form {
-                    let today = chrono::Local::now()
-                        .date_naive()
-                        .format("%Y-%m-%d")
-                        .to_string();
-                    f.date = today.clone();
-                    if f.end_date.is_empty() || f.end_date < today {
-                        f.end_date = today;
-                    }
-                }
-                Command::none()
-            }
-            Message::FormStartNow => {
-                if let Some(f) = &mut self.form {
-                    let now = chrono::Local::now();
-                    f.start_time = now.format("%H:%M").to_string();
-                    f.end_time =
-                        (now + Duration::hours(1)).format("%H:%M").to_string();
-                }
-                Command::none()
-            }
         }
     }
 
+    /// Schedules a debounced window-state save. If one is already pending, the
+    /// new one is dropped (the pending save will pick up the latest geometry
+    /// anyway because it reads from `self`).
     fn schedule_window_save(&mut self) -> Command<Message> {
         if self.pending_window_save {
             return Command::none();

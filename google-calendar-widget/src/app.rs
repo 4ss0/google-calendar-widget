@@ -291,6 +291,12 @@ pub struct App {
     pub auth_retry_in_flight: bool,
     pub last_focus_fetch: Option<std::time::Instant>,
     pub form: Option<EventForm>,
+    /// Index of the "current" text-input field for Tab traversal. Reset to 0
+    /// every time the form is (re)opened or its structure changes (all_day /
+    /// recurring toggles). iced does not implement Tab traversal itself, so we
+    /// track the position manually and focus the next/previous field on each
+    /// Tab / Shift+Tab.
+    pub form_focus: usize,
     pub saving: bool,
     pub last_error: Option<String>,
     pub pending_undo: Option<PendingUndo>,
@@ -301,12 +307,37 @@ pub struct App {
     pub search_query: String,
     pub drag: Option<DragState>,
     pub hover_date: Option<NaiveDate>,
+    pub last_desktop_foreground: bool,
 }
 
 impl App {
     pub fn layout(&self) -> Layout {
         Layout::from_width(self.window_size.width)
     }
+}
+
+/// Returns the ordered list of text-input IDs visible in the given form.
+/// The order determines the Tab / Shift+Tab traversal.
+///
+/// Fields that are hidden by the current form state (time inputs for an
+/// all-day event, recurrence inputs outside the create mode, etc.) are
+/// excluded, so Tab never lands on an invisible field.
+pub fn visible_form_field_ids(form: &EventForm) -> Vec<iced::widget::text_input::Id> {
+    use iced::widget::text_input::Id;
+    let mut ids = vec![
+        Id::new("form_title"),
+        Id::new("form_date"),
+        Id::new("form_end_date"),
+    ];
+    if !form.all_day {
+        ids.push(Id::new("form_start_time"));
+        ids.push(Id::new("form_end_time"));
+    }
+    if matches!(form.mode, FormMode::Create) && form.recurring {
+        ids.push(Id::new("form_recur_interval"));
+        ids.push(Id::new("form_recur_until"));
+    }
+    ids
 }
 
 // Tests: exercise the EventIndex date bucketing, sorting and search filter.

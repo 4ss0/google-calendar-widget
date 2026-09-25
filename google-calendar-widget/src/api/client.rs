@@ -106,8 +106,11 @@ pub struct CalendarEvent {
 /// accidentally mixing up positional arguments (e.g. `start`/`end` or
 /// `color_id`/`all_day`).
 ///
-/// `recurrence` is only meaningful for `create_event` (and internally for the
-/// tail of a "this and following" split); update functions ignore it.
+/// `recurrence` semantics:
+///   - `None`     => the field is omitted from the request body (Google
+///                   leaves whatever recurrence was already set untouched).
+///   - `Some(v)`  => the field is sent as-is. Use `Some(vec![rrule])` to add
+///                   or replace recurrence, and `Some(vec![])` to clear it.
 pub struct EventInput<'a> {
     pub summary: &'a str,
     pub start: DateTime<Utc>,
@@ -118,7 +121,8 @@ pub struct EventInput<'a> {
 }
 
 impl<'a> EventInput<'a> {
-    /// Convenience constructor for the common case where there is no RRULE.
+    /// Convenience constructor for the common case where recurrence is not
+    /// being changed (create without RRULE, or plain single-instance edit).
     pub fn new(
         summary: &'a str,
         start: DateTime<Utc>,
@@ -435,9 +439,14 @@ pub async fn create_event(
     convert(event).ok_or_else(|| anyhow::anyhow!("Invalid event returned"))
 }
 
-/// PATCH a single instance (or a non-recurring event). `recurrence` is
-/// intentionally omitted: patching RRULE requires a dedicated body and is not
-/// part of single-instance edits.
+/// PATCH a single event (or a single occurrence of a series).
+///
+/// `input.recurrence` semantics:
+///   - `None`     => the `recurrence` field is omitted, so whatever the
+///                   event already had is preserved.
+///   - `Some(v)`  => the field is set to `v`. Use this to *convert* a
+///                   non-recurring event into a recurring one, or to clear
+///                   recurrence with `Some(vec![])`.
 pub async fn update_event(
     access_token: &str,
     calendar_id: &str,
@@ -456,7 +465,7 @@ pub async fn update_event(
         start: start_body,
         end: end_body,
         color_id: input.color_id.map(|s| s.to_string()),
-        recurrence: None,
+        recurrence: input.recurrence,
     };
     let resp = http()
         .patch(&url)

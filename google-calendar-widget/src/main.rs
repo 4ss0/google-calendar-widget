@@ -1,3 +1,11 @@
+//! Crate root. Sets up the iced application, loads persisted state (config,
+//! refresh token, window geometry), and wires the platform-specific startup
+//! sequence (auth refresh + Win32 window tweaks).
+//!
+//! On Windows the binary is built as a GUI app in release (no console window).
+//! The `--minimized` flag is honored so the app can start hidden when launched
+//! by the autostart registry entry.
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
@@ -26,6 +34,7 @@ use iced::window::Position;
 use iced::{Application, Command, Element, Point, Size, Subscription, Theme};
 
 fn main() -> iced::Result {
+    // Best-effort: load a .env file if present (useful for dev, ignored in prod).
     dotenvy::dotenv().ok();
 
     crate::log::line();
@@ -40,6 +49,9 @@ fn main() -> iced::Result {
         AppConfig::config_dir()
     ));
 
+    // Restore the last known window geometry if available. If the previous
+    // session never observed a real position (position_is_default), ask the
+    // OS to choose the position again.
     let saved = WindowState::load();
     let (size, position) = match &saved {
         Some(w) => (
@@ -53,19 +65,21 @@ fn main() -> iced::Result {
         None => (Size::new(1150.0, 850.0), Position::Default),
     };
 
+    // `--minimized` is used by the autostart registry entry so the widget
+    // doesn't pop up at login.
     let started_minimized = std::env::args().any(|a| a == "--minimized");
 
     App::run(iced::Settings {
         window: iced::window::Settings {
+            // The window background is painted by our own containers, not by iced.
             transparent: true,
+            // Custom title bar is drawn in ui/top_bar.rs and view/mod.rs.
             decorations: false,
             level: iced::window::Level::Normal,
             resizable: true,
             visible: !started_minimized,
             size,
             position,
-            // Floor chosen so the month view always has room for a one-line
-            // event box (time + summary) even with 6 visible weeks.
             min_size: Some(iced::Size::new(360.0, 420.0)),
             ..Default::default()
         },
@@ -84,11 +98,15 @@ impl Application for App {
 
         let today = chrono::Local::now().date_naive();
         let autostart_enabled = autostart::is_autostart_enabled();
+        // Rewrites the registry entry to the current .exe path if it was moved.
         autostart::heal_autostart();
         crate::log::write(&format!("autostart enabled: {}", autostart_enabled));
         let started_minimized = std::env::args().any(|a| a == "--minimized");
         let palette = ColorPalette::standard();
 
+        // Restore theme + geometry. On first run (no saved state) fall back to
+        // the system dark-mode preference on Windows. `position_known` tells
+        // us whether the saved position is meaningful or just a placeholder.
         let saved = WindowState::load();
         let (window_size, window_position, dark_mode, position_known) = match saved {
             Some(w) => {
@@ -118,6 +136,7 @@ impl Application for App {
         let loaded_config = AppConfig::load();
         crate::log::write(&format!("config loaded: {}", loaded_config.is_some()));
 
+        // Refresh token is only meaningful if credentials exist.
         let existing_refresh = if loaded_config.is_some() {
             let rt = auth::oauth::load_refresh_token();
             crate::log::write(&format!(
@@ -129,6 +148,10 @@ impl Application for App {
             None
         };
 
+        // Decide the initial screen:
+        //   - No config -> Setup wizard.
+        //   - Config + refresh token -> go straight to Loading (silent refresh).
+        //   - Config but no refresh token -> WaitingAuth (full OAuth flow).
         let (config, initial_state, setup_form) = match loaded_config {
             Some(cfg) => {
                 let state = if existing_refresh.is_some() {
@@ -152,6 +175,8 @@ impl Application for App {
             ),
         };
 
+        // Wait for the OS to create the HWND before applying Win32 tweaks.
+        // The window is found by title ("Google Calendar Widget").
         let platform_cmd = Command::perform(
             async {
                 #[cfg(target_os = "windows")]
@@ -162,6 +187,7 @@ impl Application for App {
                             break;
                         }
                     }
+                    // Extra delay to let iced finish its own window setup.
                     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                 }
                 #[cfg(not(target_os = "windows"))]
@@ -173,12 +199,14 @@ impl Application for App {
         );
 
         let startup_cmd = if matches!(initial_state, app::AppState::Setup) {
+            // In setup mode there is nothing to auth yet.
             Command::batch(vec![platform_cmd])
         } else {
             let client_id = config.client_id.clone();
             let client_secret = config.client_secret.clone();
 
             let auth_cmd = if let Some(rt) = existing_refresh.clone() {
+                // Silent refresh: no browser interaction.
                 Command::perform(
                     async move {
                         auth::oauth::refresh_access_token(&client_id, &client_secret, &rt)
@@ -188,6 +216,7 @@ impl Application for App {
                     Message::TokenPolled,
                 )
             } else {
+                // First run with credentials but no token: full OAuth flow.
                 Command::perform(
                     async move {
                         auth::oauth::run_full_auth_flow(&client_id, &client_secret)
@@ -227,6 +256,7 @@ impl Application for App {
                 auth_retry_in_flight: false,
                 last_focus_fetch: None,
                 form: None,
+                form_focus: 0,
                 saving: false,
                 last_error: None,
                 pending_undo: None,
@@ -235,6 +265,7 @@ impl Application for App {
                 search_query: String::new(),
                 drag: None,
                 hover_date: None,
+                last_desktop_foreground: false,
             },
             startup_cmd,
         )
@@ -245,6 +276,8 @@ impl Application for App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        // Global event stream: window resize/move/focus, cursor position, and
+        // left-button release (used to terminate resize and drag operations).
         let events = iced::event::listen_with(|event, _status| match event {
             iced::Event::Window(_id, iced::window::Event::Resized { width, height }) => {
                 Some(Message::WindowResized(Size::new(width as f32, height as f32)))
@@ -262,9 +295,17 @@ impl Application for App {
             _ => None,
         });
 
+        // Periodically re-pin the window to the bottom of the z-order so it
+        // stays behind normal apps but above the desktop wallpaper.
+        let bottom_tick = iced::time::every(std::time::Duration::from_millis(500))
+            .map(|_| Message::KeepAtBottom);
+
+        // The tray-icon crate exposes non-Send event receivers, so we poll them
+        // from the iced update loop at a low frequency.
         let tray_tick = iced::time::every(std::time::Duration::from_millis(100))
             .map(|_| Message::PollTray);
 
+        // Auto-retry auth every 10s while in Error state.
         let auto_retry = if matches!(self.state, AppState::Error(_)) {
             iced::time::every(std::time::Duration::from_secs(10))
                 .map(|_| Message::AutoRetryTick)
@@ -272,17 +313,31 @@ impl Application for App {
             Subscription::none()
         };
 
-        let keyboard = iced::keyboard::on_key_press(|key, _modifiers| match key {
+        // Escape closes the event form; Tab / Shift+Tab move focus between
+        // the form's text inputs; Enter submits the form. iced does not
+        // implement Tab traversal itself, so we drive it from here.
+        let keyboard = iced::keyboard::on_key_press(|key, modifiers| match key {
             iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => {
                 Some(Message::CloseForm)
+            }
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab) => {
+                if modifiers.shift() {
+                    Some(Message::FormTabPrev)
+                } else {
+                    Some(Message::FormTabNext)
+                }
+            }
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) => {
+                Some(Message::SaveEvent)
             }
             _ => None,
         });
 
-        Subscription::batch(vec![events, tray_tick, auto_retry, keyboard])
+        Subscription::batch(vec![events, bottom_tick, tray_tick, auto_retry, keyboard])
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
+        // Delegates to update.rs::App::update.
         self.update(message)
     }
 
@@ -291,6 +346,8 @@ impl Application for App {
     }
 
     fn theme(&self) -> Theme {
+        // iced needs a built-in theme to color built-in widgets (buttons, text
+        // inputs). Our own containers use AppTheme directly.
         if self.theme.is_dark {
             Theme::Dark
         } else {

@@ -48,7 +48,9 @@ pub struct Strings {
     pub form_start: &'static str,
     pub form_end: &'static str,
     pub form_color: &'static str,
+    #[allow(dead_code)] 
     pub form_today: &'static str,
+    #[allow(dead_code)] 
     pub form_now: &'static str,
     pub form_save: &'static str,
     pub form_saving: &'static str,
